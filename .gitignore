@@ -1,0 +1,16 @@
+# Datos locales (proyectos, claves cifradas, sesiones): jamás al repo
+datos/
+**/datos/
+
+# Secretos reales (la plantilla .env.example sí se versiona)
+.env
+**/.env
+
+# El repositorio original auditado (clon de terceros con su propio .git)
+_original/
+
+# Compilación y dependencias
+frontend/node_modules/
+frontend/dist/
+**/__pycache__/
+**/*.pyc

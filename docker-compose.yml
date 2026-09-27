@@ -1,0 +1,32 @@
+# Despliegue de un solo servicio: API + interfaz + ffmpeg.
+#
+# Coolify: crea la app tipo "Docker Compose" y pega este fichero, o usa
+# el Dockerfile directo. Lo único imprescindible es el volumen /datos.
+services:
+  estudio:
+    build: .
+    image: estudio-video
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # URL pública canónica (para el chequeo de Origin en mutaciones).
+      # En Coolify pon aquí el dominio que asignes, p. ej.:
+      #   ESTUDIO_ORIGEN=https://video.midominio.com
+      - ESTUDIO_ORIGEN=${ESTUDIO_ORIGEN:-}
+      # Opcional: hash scrypt de la contraseña (si no, el primer visitante
+      # la fija desde la propia interfaz; ver README).
+      - ESTUDIO_HASH=${ESTUDIO_HASH:-}
+      # Opcional: nombre de usuario (por defecto "estudio").
+      - ESTUDIO_USUARIO=${ESTUDIO_USUARIO:-estudio}
+    volumes:
+      - estudio_datos:/datos
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/salud', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  estudio_datos:

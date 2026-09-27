@@ -1,0 +1,20 @@
+# Compilación
+frontend/node_modules
+frontend/dist
+**/__pycache__
+**/*.pyc
+
+# Datos locales (proyectos, claves, costes): jamás entran en la imagen
+datos
+**/datos
+
+# El repositorio original auditado y documentación local
+_original
+docs
+
+# Varios
+.git
+.gitignore
+.env
+*.md
+docker-compose*.yml
