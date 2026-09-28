@@ -52,68 +52,182 @@ def _fuente() -> str:
     return ""
 
 
-def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400) -> Path:
-    """Dibuja el rotulo (texto + banda semitransparente) con PIL."""
-    from PIL import Image, ImageDraw, ImageFont
-    fuente_ruta = _fuente()
-    tamano = 64
-    fuente = (ImageFont.truetype(fuente_ruta, tamano) if fuente_ruta
-              else ImageFont.load_default())
-    imagen = Image.new("RGBA", (ANCHO, 200), (0, 0, 0, 0))
-    dibujo = ImageDraw.Draw(imagen)
-    bbox = dibujo.textbbox((0, 0), texto, font=fuente)
-    ancho_texto, alto_texto = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    # partir en lineas si se pasa de ancho
-    lineas = [texto]
-    if ancho_texto > ancho_max:
-        palabras = texto.split()
-        lineas, actual = [], ""
-        for palabra in palabras:
-            prueba = f"{actual} {palabra}".strip()
-            ancho_prueba = dibujo.textbbox((0, 0), prueba, font=fuente)[2]
-            if ancho_prueba > ancho_max and actual:
-                lineas.append(actual)
-                actual = palabra
-            else:
-                actual = prueba
-        if actual:
-            lineas.append(actual)
-        alto_texto = len(lineas) * (alto_texto + 14)
-        imagen = Image.new("RGBA", (ANCHO, alto_texto + 60), (0, 0, 0, 0))
-        dibujo = ImageDraw.Draw(imagen)
-        y = 30
-        for linea in lineas:
-            bbox = dibujo.textbbox((0, 0), linea, font=fuente)
-            ancho_linea = bbox[2] - bbox[0]
-            x0 = (ANCHO - ancho_linea) // 2 - 28
-            dibujo.rounded_rectangle(
-                [x0, y - 12, x0 + ancho_linea + 56, y + 76], radius=18,
-                fill=(10, 12, 16, 190))
-            dibujo.text((x0 + 28, y), linea, font=fuente,
-                        fill=(245, 247, 250, 255))
-            y += alto_texto + 14
+def _color(valor) -> tuple:
+    """Un color de la paleta ('#eab308' o 'rgba(10,12,16,0.78)') a tupla PIL."""
+    import re
+    texto = str(valor or "").strip()
+    if texto.startswith("rgba"):
+        numeros = re.findall(r"[\d.]+", texto)
+        if len(numeros) >= 3:
+            alpha = int(float(numeros[3]) * 255) if len(numeros) > 3 else 255
+            return (int(float(numeros[0])), int(float(numeros[1])),
+                    int(float(numeros[2])), alpha)
     else:
-        x0 = (ANCHO - ancho_texto) // 2 - 28
-        dibujo.rounded_rectangle(
-            [x0, 30 - 12, x0 + ancho_texto + 56, 30 + 76], radius=18,
-            fill=(10, 12, 16, 190))
-        dibujo.text((x0 + 28, 30), texto, font=fuente,
-                    fill=(245, 247, 250, 255))
-    # recorte al contenido real
-    caja = imagen.getbbox()
-    imagen = imagen.crop(caja)
+        texto = texto.lstrip("#")
+        if len(texto) >= 6:
+            return (int(texto[0:2], 16), int(texto[2:4], 16),
+                    int(texto[4:6], 16), 255)
+    return (10, 12, 16, 190)
+
+
+def _fuente_de(tamano: int):
+    from PIL import ImageFont
+    ruta = _fuente()
+    return (ImageFont.truetype(ruta, tamano) if ruta
+            else ImageFont.load_default())
+
+
+def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400,
+                diseno: str = "pastilla", paleta: dict | None = None,
+                tam=1.0) -> Path:
+    """Dibuja el rotulo con el SET DE DISENO y la paleta del vídeo.
+
+    Es el mismo dibujo que grafismo.svg_rotulo (la pantalla ensena el
+    SVG, el render paga el PNG): que difieran seria una pantalla que
+    miente.
+    """
+    from PIL import Image, ImageDraw
+    from ..nucleo import grafismo
+    paleta = paleta or dict(grafismo.PALETA_DEFECTO)
+    caja = grafismo.SETS_DISENO.get(diseno,
+                                     grafismo.SETS_DISENO["pastilla"])["caja"]
+    escala = (grafismo.tamano_de(tam) if isinstance(tam, str)
+              else float(tam or 1.0))
+    tamano = int(64 * escala)
+    fuente = _fuente_de(tamano)
+    # partir en lineas midiendo de verdad (no a ojo de caracteres)
+    prueba = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+    lineas, actual = [], ""
+    for palabra in str(texto or "").split():
+        candidata = f"{actual} {palabra}".strip()
+        if prueba.textbbox((0, 0), candidata, font=fuente)[2] > ancho_max \
+                and actual:
+            lineas.append(actual)
+            actual = palabra
+        else:
+            actual = candidata
+    if actual:
+        lineas.append(actual)
+    alto_linea = tamano + 26
+    margen = 30
+    imagen = Image.new("RGBA", (ANCHO, len(lineas) * alto_linea + 2 * margen),
+                       (0, 0, 0, 0))
+    dibujo = ImageDraw.Draw(imagen)
+    velo = _color(paleta.get("velo"))
+    acento = _color(paleta.get("acento"))
+    tinta = _color(paleta.get("texto"))
+    y = margen
+    for linea in lineas:
+        bbox = dibujo.textbbox((0, 0), linea, font=fuente)
+        ancho_linea = bbox[2] - bbox[0]
+        x0 = (ANCHO - ancho_linea) // 2
+        if caja == "pastilla":
+            dibujo.rounded_rectangle(
+                [x0 - 28, y - 10, x0 + ancho_linea + 28, y + tamano + 14],
+                radius=18, fill=velo)
+        elif caja == "barra":
+            dibujo.rectangle([x0 - 28, y - 10, x0 - 20, y + tamano + 14],
+                             fill=acento)
+        elif caja == "pleno":
+            dibujo.rectangle([0, y - 10, ANCHO, y + tamano + 14], fill=velo)
+            dibujo.rectangle([0, y - 10, 14, y + tamano + 14], fill=acento)
+        else:  # sombra: sin caja, texto claro con sombra suave
+            sombra = tuple(max(0, c - 60) for c in tinta[:3]) + (170,)
+            dibujo.text((x0 + 3, y + 4), linea, font=fuente, fill=sombra)
+        dibujo.text((x0, y), linea, font=fuente, fill=tinta)
+        y += alto_linea
+    caja_real = imagen.getbbox()
+    if caja_real:
+        imagen = imagen.crop(caja_real)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    imagen.save(destino)
+    return destino
+
+
+def _cartela_png(plantilla: str, datos: dict | None, destino: Path,
+                 paleta: dict | None = None) -> Path:
+    """Una cartela completa (1920x1080): el plano entero ES texto.
+
+    El mismo dibujo que grafismo.svg_cartela, en raster para ffmpeg.
+    Sin marca de tiempo de lectura: esa es de la pantalla, no del vídeo.
+    """
+    from PIL import Image, ImageDraw
+    from ..nucleo import grafismo
+    paleta = paleta or dict(grafismo.PALETA_DEFECTO)
+    datos = datos or {}
+    imagen = Image.new("RGB", (ANCHO, ALTO), _color(paleta.get("fondo"))[:3])
+    dibujo = ImageDraw.Draw(imagen)
+    acento = _color(paleta.get("acento"))[:3]
+    tinta = _color(paleta.get("texto"))[:3]
+    cx, cy = ANCHO // 2, ALTO // 2
+
+    def centro(texto, cy_, tamano, color):
+        fuente = _fuente_de(tamano)
+        bbox = dibujo.textbbox((0, 0), str(texto), font=fuente)
+        ancho, alto = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        dibujo.text(((ANCHO - ancho) // 2 - bbox[0], cy_ - alto // 2 - bbox[1]),
+                    str(texto), font=fuente, fill=color)
+
+    if plantilla == "cita":
+        centro("“", cy - 130, 150, acento)
+        centro(datos.get("texto", ""), cy + 20, 72, tinta)
+        if datos.get("autor"):
+            centro(f"— {datos['autor']}", cy + 150, 38, acento)
+    elif plantilla == "dato":
+        centro(datos.get("cifra", ""), cy - 30, 220, acento)
+        if datos.get("pie"):
+            centro(datos.get("pie", ""), cy + 170, 52, tinta)
+    elif plantilla == "capitulo":
+        centro(f"C A P Í T U L O  {datos.get('numero', '')}", cy - 120, 44,
+               acento)
+        dibujo.rectangle([cx - 90, cy - 60, cx + 90, cy - 56], fill=acento)
+        centro(datos.get("titulo", ""), cy + 70, 96, tinta)
+    elif plantilla == "cierre":
+        centro(datos.get("titulo", ""), cy - 30, 110, tinta)
+        if datos.get("sub"):
+            centro(datos.get("sub", ""), cy + 120, 48, acento)
+    else:  # titulo
+        dibujo.rectangle([cx - 70, cy - 170, cx + 70, cy - 164], fill=acento)
+        centro(datos.get("titulo", ""), cy, 130, tinta)
     destino.parent.mkdir(parents=True, exist_ok=True)
     imagen.save(destino)
     return destino
 
 
 def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None,
-              destino: Path, calidad: str, trabajo) -> Path:
-    """Un segmento de video: imagen animada + rotulo + audio de la escena."""
-    imagen = proyecto.ruta(plano["imagen"])
+              destino: Path, calidad: str, trabajo,
+              cfg_grafismo: dict | None = None) -> Path:
+    """Un segmento de video: imagen animada + rotulo + audio de la escena.
+
+    Los planos de CARTELA no traen imagen: el plano entero es un PNG de
+    texto (la misma plantilla que ensena la pantalla), estatico.
+    """
+    cfg = cfg_grafismo or {}
     audio = proyecto.ruta(escena["audio"])
     duracion = float(escena["duracion"])
     ajustes = CALIDADES.get(calidad, CALIDADES["estandar"])
+    cartela = plano.get("cartela")
+    if cartela:
+        png = _cartela_png(cartela.get("plantilla", "titulo"),
+                           cartela.get("datos", {}),
+                           destino.parent / f"{plano['escena']}_cartela.png",
+                           paleta=cfg.get("paleta"))
+        orden = [comun.ffmpeg(), "-y", "-loglevel", "error",
+                 "-loop", "1", "-t", f"{duracion:.3f}", "-i", str(png),
+                 "-i", str(audio),
+                 "-vf", "setsar=1", "-r", str(FPS),
+                 "-map", "0:v", "-map", "1:a",
+                 "-c:v", "libx264", "-preset", ajustes["preset"],
+                 "-crf", ajustes["crf"], "-pix_fmt", "yuv420p",
+                 "-c:a", "aac", "-b:a", "192k",
+                 "-t", f"{duracion:.3f}", str(destino)]
+        proceso = subprocess.run(orden, capture_output=True, text=True,
+                                 timeout=1800)
+        if proceso.returncode != 0 or not destino.exists():
+            raise RuntimeError(f"ffmpeg fallo en {plano['escena']}: "
+                               f"{proceso.stderr[-400:]}")
+        return destino
+    imagen = proyecto.ruta(plano["imagen"])
     zoom_entra = hash(plano["escena"]) % 2 == 0  # alterna acercar/alejar
     if zoom_entra:
         expresion = "'min(1.0+0.09*on/({d}*{f}),1.09)'"
@@ -132,7 +246,10 @@ def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None
     base = f"[0:v]{','.join(filtros)}"
     if rotulo:
         png = _rotulo_png(rotulo["texto"],
-                          destino.parent / f"{plano['escena']}_rotulo.png")
+                          destino.parent / f"{plano['escena']}_rotulo.png",
+                          diseno=cfg.get("diseno", "pastilla"),
+                          paleta=cfg.get("paleta"),
+                          tam=cfg.get("tam", "normal"))
         aparece = float(rotulo.get("aparece", 0.0))
         dura = float(rotulo.get("dura", 4.0))
         dura = min(dura, max(0.8, duracion - aparece))
@@ -173,6 +290,12 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     calidad = params.get("calidad", "estandar")
     planos_de = {p["escena"]: p for p in assets["planos"]}
     rotulos_de = {r["id"]: r for r in callouts.get("rotulos", [])}
+    # el grafismo del vídeo, ESCRITO en los datos de callouts al generarse:
+    # el render no relee params de otro paso (una vista vieja tiene que
+    # poder reproducir qué diseño dibujó)
+    cfg_grafismo = {"diseno": callouts.get("diseno", "pastilla"),
+                    "paleta": callouts.get("paleta") or {},
+                    "tam": callouts.get("subtitulo_tam", "normal")}
     temporal = Path(tempfile.mkdtemp(prefix="render_"))
     segmentos = []
     total = 0.0
@@ -185,7 +308,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
                        f"{escena['id']} ({escena['duracion']} s)")
         destino = temporal / f"{indice:04d}_{escena['id']}.mp4"
         _segmento(proyecto, escena, plano, rotulos_de.get(escena["id"]),
-                  destino, calidad, trabajo)
+                  destino, calidad, trabajo, cfg_grafismo)
         segmentos.append(destino)
         total += float(escena["duracion"])
     # concatenar (mismos codecs: copia sin recodificar)

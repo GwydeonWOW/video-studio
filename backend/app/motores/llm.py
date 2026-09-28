@@ -66,6 +66,9 @@ ROLES_DEFECTO = {
     "correccion": {"proveedor": "glm", "modelo": "glm-5.3"},
     "titulos": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
     "descripcion": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
+    "direccion": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
+    "redactor": {"proveedor": "glm", "modelo": "glm-5.3"},
+    "cartelas": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
 }
 
 

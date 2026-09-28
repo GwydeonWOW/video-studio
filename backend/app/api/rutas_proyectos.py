@@ -16,19 +16,21 @@ import shutil
 import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from .. import seguridad
 from ..config import AJUSTES
 from ..nucleo import estilo
 from ..nucleo import coste as nucleo_coste
+from ..nucleo import grafismo
 from ..nucleo.coste import de_proyecto
 from ..nucleo.estado import GRAFO, Estado, descendientes_de
 from ..nucleo import recetas
 from ..nucleo.proyecto import (Proyecto, ahora, id_valido, leer_json,
                                leer_jsonl, lock_de)
 from ..nucleo.trabajos import TrabajoCancelado
-from ..pasos import p3_guion, p4_voz, p6_assets, registro
+from ..pasos import (cartelas, direccion, p2_brief, p3_guion, p4_voz,
+                     p6_assets, redactor, registro)
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
@@ -1160,3 +1162,354 @@ def bitacora_llm(pid: str, limite: int = 200) -> dict:
         lineas.append(f"- {entrada.get('t', '')} · {entrada.get('evento', '?')}"
                       f"{extra}")
     return {"texto": "\n".join(lineas), "eventos": len(entradas)}
+
+
+# ---------------------------------------------------- grafismo por plano
+#
+# Dirección, redactor, cartelas y diseño de rótulos: decisiones que se
+# guardan POR PLANO en `params.unidades` de assets (la firma del paso no
+# se mueve: se ensucia SOLO el plano tocado) o en los params de callouts
+# (el grafismo no cuesta imágenes). Proponer es un trabajo de cola: la
+# pantalla sigue el sondeo del trabajo y lee su `resultado`.
+
+def _planos_del_guion(proyecto: Proyecto) -> list[dict]:
+    guion = p2_brief.proyecto_leer_datos(proyecto, "guion") or {}
+    return [{"id": e.get("id", ""), "titulo": e.get("titulo", ""),
+             "narracion": str(e.get("narracion", ""))}
+            for e in guion.get("escenas", []) if isinstance(e, dict)]
+
+
+def _paleta_actual(estado: Estado) -> dict:
+    """La paleta vigente: estilo del canal + lo fijado a mano en callouts."""
+    fijados = ((estado.paso("callouts").get("params", {})
+                .get("paleta") or {}).get("fijados"))
+    try:
+        estilo_grafico = estilo.leer(AJUSTES.datos).get("estilo_grafico", "")
+    except Exception:                                  # noqa: BLE001
+        estilo_grafico = ""
+    return grafismo.paleta_de(estilo_grafico, fijados)
+
+
+def _diseno_sugerido() -> str:
+    """Un set honesto para el estilo del canal (sugerencia, no mandato)."""
+    try:
+        texto = estilo.leer(AJUSTES.datos).get("estilo_grafico", "").lower()
+    except Exception:                                  # noqa: BLE001
+        texto = ""
+    if any(p in texto for p in ("neon", "neón", "cyber", "futur")):
+        return "pleno"
+    if any(p in texto for p in ("elegan", "serif", "editorial")):
+        return "sombra"
+    return "pastilla"
+
+
+def _ids_de_planos(proyecto: Proyecto) -> set[str]:
+    return {p["id"] for p in _planos_del_guion(proyecto) if p["id"]}
+
+
+# ------------------------------------------------------------- dirección
+
+@router.get("/{pid}/direccion", dependencies=[_SESION])
+def leer_direccion(pid: str) -> dict:
+    """El plan de dirección guardado: qué se ve en cada plano."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    return {"plan": direccion.plan_de(params),
+            "planos": _planos_del_guion(proyecto),
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.put("/{pid}/direccion", dependencies=_MUTAR)
+def guardar_direccion(pid: str, cuerpo: dict) -> dict:
+    """Escribe la dirección de planos concretos.
+
+    Un texto vacío QUITA la dirección de ese plano (vuelve al prompt
+    armado por capas). Se ensucian sólo los planos tocados.
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    ids = _ids_de_planos(proyecto)
+    plan = (cuerpo or {}).get("plan")
+    if not isinstance(plan, dict) or not plan:
+        raise HTTPException(400, "se esperaba {plan: {plano: direccion}}")
+    unidades, tocados, avisos = {}, [], []
+    for uid, texto in plan.items():
+        sid = str(uid).strip().upper()
+        if sid not in ids:
+            avisos.append(f"{sid}: no es un plano de este vídeo, se ignora")
+            continue
+        limpio, motivo = direccion.limpiar_linea(texto)
+        if limpio is None:
+            avisos.append(f"{sid}: {motivo}")
+            continue
+        if motivo:
+            avisos.append(f"{sid}: {motivo}")
+        unidades[sid] = {"direccion": limpio}
+        tocados.append(sid)
+    if not tocados:
+        raise HTTPException(400, "; ".join(avisos) or "nada que guardar")
+    estado.actualizar_params("assets", {"unidades": unidades})
+    estado.marcar_obsoleto("assets", tocados)
+    proyecto.bitacora("direccion_guardada", {"planos": tocados})
+    params = estado.paso("assets").get("params", {})
+    return {"plan": direccion.plan_de(params), "tocados": tocados,
+            "avisos": avisos,
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.post("/{pid}/direccion/proponer", status_code=202, dependencies=_MUTAR)
+def proponer_direccion(pid: str) -> dict:
+    """El agente propone qué se ve en cada plano (trabajo de cola)."""
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+
+    def funcion(trabajo):
+        return direccion.proponer(proyecto, params, trabajo)
+
+    trabajo = GESTOR.lanzar(pid, "direccion", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+# -------------------------------------------------------------- redactor
+
+@router.get("/{pid}/redactor", dependencies=[_SESION])
+def leer_redactor(pid: str) -> dict:
+    """Los prompts escritos enteros, por plano."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    return {"plan": redactor.plan_de(params),
+            "planos": _planos_del_guion(proyecto),
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.put("/{pid}/redactor", dependencies=_MUTAR)
+def guardar_redactor(pid: str, cuerpo: dict) -> dict:
+    """Escribe el prompt completo de planos concretos (MÁNDA sobre capas).
+
+    Un texto vacío quita el prompt redactado de ese plano.
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    ids = _ids_de_planos(proyecto)
+    plan = (cuerpo or {}).get("plan")
+    if not isinstance(plan, dict) or not plan:
+        raise HTTPException(400, "se esperaba {plan: {plano: prompt}}")
+    unidades, tocados, avisos = {}, [], []
+    for uid, texto in plan.items():
+        sid = str(uid).strip().upper()
+        if sid not in ids:
+            avisos.append(f"{sid}: no es un plano de este vídeo, se ignora")
+            continue
+        limpio, motivo = redactor.limpiar_ficha(texto)
+        if limpio is None:
+            avisos.append(f"{sid}: {motivo}")
+            continue
+        if motivo:
+            avisos.append(f"{sid}: {motivo}")
+        unidades[sid] = {"prompt": limpio}
+        tocados.append(sid)
+    if not tocados:
+        raise HTTPException(400, "; ".join(avisos) or "nada que guardar")
+    estado.actualizar_params("assets", {"unidades": unidades})
+    estado.marcar_obsoleto("assets", tocados)
+    proyecto.bitacora("redactor_guardado", {"planos": tocados})
+    params = estado.paso("assets").get("params", {})
+    return {"plan": redactor.plan_de(params), "tocados": tocados,
+            "avisos": avisos,
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.post("/{pid}/redactor/proponer", status_code=202, dependencies=_MUTAR)
+def proponer_redactor(pid: str) -> dict:
+    """El agente redacta el prompt entero de cada plano (trabajo de cola)."""
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+
+    def funcion(trabajo):
+        return redactor.proponer(proyecto, params, trabajo)
+
+    trabajo = GESTOR.lanzar(pid, "redactor", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+# -------------------------------------------------------------- cartelas
+
+@router.get("/{pid}/cartelas", dependencies=[_SESION])
+def leer_cartelas(pid: str) -> dict:
+    """El plan de cartelas guardado y el catálogo de plantillas."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    planos = _planos_del_guion(proyecto)
+    return {"plan": cartelas.plan_de(params),
+            "plantillas": grafismo.PLANTILLAS_CARTELA,
+            "planos": planos,
+            "max_cartelas": max(1, round(len(planos)
+                                         * cartelas.FRACCION_MAXIMA)),
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.get("/{pid}/cartelas/vista", dependencies=[_SESION])
+def vista_cartela(pid: str, plano: str) -> Response:
+    """La cartela de un plano como SVG: lo que dibuja el render."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    ficha = cartelas.plan_de(params).get(str(plano).strip().upper())
+    if not ficha:
+        raise HTTPException(404, f"el plano {plano} no lleva cartela")
+    voz = p2_brief.proyecto_leer_datos(proyecto, "voz") or {}
+    duracion = next((float(v.get("duracion", 0) or 0)
+                     for v in voz.get("escenas", [])
+                     if v.get("id") == str(plano).strip().upper()), 4.0)
+    svg = grafismo.svg_cartela(ficha.get("plantilla", "titulo"),
+                               ficha.get("datos"), _paleta_actual(estado),
+                               duracion or 4.0)
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@router.post("/{pid}/cartelas/plan", status_code=202, dependencies=_MUTAR)
+def proponer_cartelas(pid: str) -> dict:
+    """El agente decide qué tramos van mejor como cartela (trabajo de cola)."""
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+
+    def funcion(trabajo):
+        return cartelas.proponer(proyecto, params, trabajo)
+
+    trabajo = GESTOR.lanzar(pid, "cartelas", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+@router.put("/{pid}/cartelas", dependencies=_MUTAR)
+def guardar_cartelas(pid: str, cuerpo: dict) -> dict:
+    """Fija (o quita) la cartela de planos concretos.
+
+    Decidirla antes de generar AHORRA la imagen de ese plano: por eso
+    vive con assets y por eso se ensucia el plano tocado.
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    ids = _ids_de_planos(proyecto)
+    plan = (cuerpo or {}).get("plan")
+    if not isinstance(plan, dict) or not plan:
+        raise HTTPException(400, "se esperaba {plan: {plano: ficha|null}}")
+    unidades, tocados, avisos = {}, [], []
+    for uid, ficha in plan.items():
+        sid = str(uid).strip().upper()
+        if sid not in ids:
+            avisos.append(f"{sid}: no es un plano de este vídeo, se ignora")
+            continue
+        if ficha is None:  # quitar la cartela: el plano vuelve a pagar imagen
+            unidades[sid] = {"cartela": None}
+            tocados.append(sid)
+            continue
+        if not isinstance(ficha, dict):
+            avisos.append(f"{sid}: no trae ficha, se ignora")
+            continue
+        valores, motivos = cartelas.validar(str(ficha.get("plantilla", "")),
+                                            ficha.get("datos"))
+        if valores is None:
+            avisos.append(f"{sid}: {'; '.join(motivos)}")
+            continue
+        avisos.extend(f"{sid}: {m}" for m in motivos)
+        unidades[sid] = {"cartela": {
+            "plantilla": str(ficha.get("plantilla", "")),
+            "datos": valores,
+            "por_que": str(ficha.get("por_que", "")).strip()}}
+        tocados.append(sid)
+    if not tocados:
+        raise HTTPException(400, "; ".join(avisos) or "nada que guardar")
+    estado.actualizar_params("assets", {"unidades": unidades})
+    estado.marcar_obsoleto("assets", tocados)
+    proyecto.bitacora("cartelas_guardadas", {"planos": tocados})
+    params = estado.paso("assets").get("params", {})
+    return {"plan": cartelas.plan_de(params), "tocados": tocados,
+            "avisos": avisos,
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+# ------------------------------------------------------ diseño de rótulos
+
+@router.get("/{pid}/callouts/diseno", dependencies=[_SESION])
+def leer_diseno(pid: str) -> dict:
+    """Sets de diseño, paleta y tamaño: UN grafismo para todo el vídeo."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("callouts").get("params", {})
+    return {"sets": grafismo.SETS_DISENO,
+            "elegido": params.get("diseno", "pastilla"),
+            "sugerido": _diseno_sugerido(),
+            "paleta": _paleta_actual(estado),
+            "fijados": (params.get("paleta") or {}).get("fijados") or {},
+            "tamanos": grafismo.SUB_TAMANOS,
+            "subtitulo_tam": params.get("subtitulo_tam", "normal"),
+            "obsoleto": estado.estado_de("callouts") == "obsoleto"}
+
+
+@router.put("/{pid}/callouts/plan", dependencies=_MUTAR)
+def guardar_diseno(pid: str, cuerpo: dict) -> dict:
+    """Cambia el grafismo: no cuesta imágenes, sólo rehacer capas y render."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    datos = cuerpo if isinstance(cuerpo, dict) else {}
+    extra = {}
+    diseno = str(datos.get("diseno", "")).strip()
+    if diseno:
+        if diseno not in grafismo.SETS_DISENO:
+            raise HTTPException(400, "set desconocido; los que hay: "
+                                     + ", ".join(grafismo.SETS_DISENO))
+        extra["diseno"] = diseno
+    tam = str(datos.get("subtitulo_tam", "")).strip()
+    if tam:
+        if tam not in grafismo.SUB_TAMANOS:
+            raise HTTPException(400, "tamaño desconocido; los que hay: "
+                                     + ", ".join(grafismo.SUB_TAMANOS))
+        extra["subtitulo_tam"] = tam
+    fijados_nuevos = ((datos.get("paleta") or {}).get("fijados"))
+    if isinstance(fijados_nuevos, dict):
+        actuales = ((estado.paso("callouts").get("params", {})
+                     .get("paleta") or {}).get("fijados") or {})
+        mezcla = dict(actuales)
+        for papel, color in fijados_nuevos.items():
+            limpio = str(color or "").strip()
+            if papel not in grafismo.PALETA_DEFECTO:
+                continue
+            if limpio:
+                mezcla[papel] = limpio
+            else:
+                mezcla.pop(papel, None)  # vacío quita el fijado manual
+        extra["paleta"] = {"fijados": mezcla}
+    if not extra:
+        raise HTTPException(400, "nada que guardar")
+    estado.actualizar_params("callouts", extra)
+    proyecto.bitacora("diseno_cambiado", extra)
+    return leer_diseno(pid)
+
+
+@router.get("/{pid}/callouts/vista", dependencies=[_SESION])
+def vista_callout(pid: str, plano: str, diseno: str | None = None,
+                  tam: str | None = None, texto: str | None = None) -> Response:
+    """El rótulo de un plano como SVG: lo que dibuja el render.
+
+    Los query params opcionales son la VISTA PREVIA de lo que la pantalla
+    está editando (aún sin guardar): sin ellos se enseña lo guardado.
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    datos = estado.datos_de("callouts") or {}
+    params = estado.paso("callouts").get("params", {})
+    sid = str(plano).strip().upper()
+    rotulo = next((r for r in datos.get("rotulos", [])
+                   if str(r.get("id", "")).upper() == sid), None)
+    if not rotulo and texto is None:
+        raise HTTPException(404, f"el plano {plano} no lleva rótulo")
+    svg = grafismo.svg_rotulo(
+        texto if texto is not None else rotulo.get("texto", ""),
+        diseno or datos.get("diseno") or params.get("diseno", "pastilla"),
+        _paleta_actual(estado),
+        tam or datos.get("subtitulo_tam")
+        or params.get("subtitulo_tam", "normal"))
+    return Response(content=svg, media_type="image/svg+xml")

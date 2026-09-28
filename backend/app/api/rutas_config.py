@@ -23,8 +23,9 @@ router = APIRouter(prefix="/api", tags=["config"])
 _SESION = Depends(seguridad.exigir_sesion)
 _MUTAR = [Depends(seguridad.exigir_sesion), Depends(seguridad.exigir_origen)]
 
-ROL_INVALIDO = "rol desconocido; roles: guion, correccion, titulos, descripcion"
-ROLES = ("guion", "correccion", "titulos", "descripcion")
+ROLES = ("guion", "correccion", "titulos", "descripcion",
+         "direccion", "redactor", "cartelas")
+ROL_INVALIDO = ("rol desconocido; roles: " + ", ".join(ROLES))
 
 
 # ------------------------------------------------------------------- salud

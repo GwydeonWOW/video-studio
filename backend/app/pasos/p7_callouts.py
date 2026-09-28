@@ -9,6 +9,7 @@ La unidad sigue siendo la escena.
 """
 from __future__ import annotations
 
+from ..nucleo import grafismo
 from ..nucleo.proyecto import Proyecto
 from . import comun, p2_brief
 from ..motores import llm
@@ -25,7 +26,8 @@ Responde SOLO JSON: {"rotulos": [{"id": "S001", "texto": str,
 
 
 def params_defecto() -> dict:
-    return {"duracion_max": 4.0}
+    return {"duracion_max": 4.0, "diseno": "pastilla",
+            "paleta": {"fijados": {}}, "subtitulo_tam": "normal"}
 
 
 def estimar(params: dict) -> dict:
@@ -81,7 +83,29 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
                         "aparece": round(aparece, 2),
                         "dura": duracion_max})
     trabajo.avance(f"{len(rotulos)} rotulos colocados")
-    return {"rotulos": rotulos}
+    # El grafismo usado queda ESCRITO en los datos: el render no relee
+    # params (los suyos son de otro paso), y una vista vieja tiene que
+    # poder reproducir qué diseño la dibujó.
+    diseno = str(params.get("diseno", "pastilla"))
+    if diseno not in grafismo.SETS_DISENO:
+        diseno = "pastilla"
+    return {"rotulos": rotulos, "diseno": diseno,
+            "paleta": grafismo.paleta_de(_estilo_del_canal(),
+                                         (params.get("paleta") or {})
+                                         .get("fijados")),
+            "subtitulo_tam": str(params.get("subtitulo_tam", "normal"))}
+
+
+def _estilo_del_canal() -> str:
+    """La guía del canal para derivar la paleta: la MISMA que siembra
+    los pasos, leída del ajuste global (no params de otro paso)."""
+    try:
+        from ..config import AJUSTES
+        from ..nucleo import estilo as modulo_estilo
+        return str(modulo_estilo.leer(AJUSTES.datos)
+                   .get("estilo_grafico", ""))
+    except Exception:                                  # noqa: BLE001
+        return ""
 
 
 def _a_json(valor) -> str:

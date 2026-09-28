@@ -69,8 +69,17 @@ def _huella(valor) -> str:
 
 
 def firma_de(paso: str, params: dict, salidas_padres: dict) -> str:
-    """Firma del paso: params propios + sellos de salida de los padres."""
-    return _huella({"paso": paso, "params": params, "padres": salidas_padres})
+    """Firma del paso: params propios + sellos de salida de los padres.
+
+    El bloque `unidades` NO entra (regla del original): es donde viven
+    las decisiones POR PLANO (feedback, dirección, redactor, cartelas).
+    Si entrara, escribir la dirección de un plano dejaría obsoletos
+    todos los demás — y con ellos todo lo que cuelga. La unidad que
+    cambia se marca aparte (`marcar_obsoleto(unidades=...)`), que es la
+    granularidad justa.
+    """
+    firmables = {k: v for k, v in (params or {}).items() if k != "unidades"}
+    return _huella({"paso": paso, "params": firmables, "padres": salidas_padres})
 
 
 class Estado:
@@ -170,10 +179,36 @@ class Estado:
         solo en parte: p.ej. corregir una escena del guion no invalida las
         imagenes de las demas. La unidad se define por paso:
         guion/voz -> escenas; assets/callouts -> planos.
+
+        Las unidades aceptadas a mano («vale») se restan: son dibujos que
+        alguien miro y dio por buenos PARA LO QUE DICEN AHORA.
         """
         ficha = self.paso(paso)
-        marcadas = ficha.get("obsoleto_unidades", [])
-        return list(marcadas)
+        marcadas = set(ficha.get("obsoleto_unidades", []))
+        marcadas -= set(ficha.get("vale_unidades", []))
+        return sorted(marcadas)
+
+    def aceptar_unidad(self, paso: str, unidad: str) -> bool:
+        """«Este dibujo me vale para lo que dice ahora».
+
+        No toca el material ni el plan: apunta CONTRA QUE se acepto. Si la
+        unidad vuelve a quedar sucia despues (otra correccion aguas
+        arriba), la tarjeta vuelve — un «ya lo he visto» permanente
+        aprobaria material que nadie ha vuelto a mirar.
+        """
+        with lock_de(self.proyecto.id):
+            estado = self.todo()
+            ficha = estado["pasos"].setdefault(paso, {})
+            marcadas = set(ficha.get("obsoleto_unidades", []))
+            if unidad not in marcadas:
+                return False
+            marcadas.discard(unidad)
+            vales = set(ficha.get("vale_unidades", []))
+            vales.add(unidad)
+            ficha["obsoleto_unidades"] = sorted(marcadas)
+            ficha["vale_unidades"] = sorted(vales)
+            escribir_json(self.proyecto.fichero_estado, estado)
+        return True
 
     # -------------------------------------------------------- aprobacion
     def esta_aprobado(self, paso: str) -> bool:
@@ -218,6 +253,37 @@ class Estado:
             escribir_json(self.proyecto.fichero_estado, estado)
         return ficha
 
+    def actualizar_params(self, paso: str, extra: dict) -> dict:
+        """Fusiona un CAMBIO PARCIAL de params (feedback) y recalcula firma.
+
+        A diferencia de `guardar_params` (la pantalla manda el objeto
+        entero), aqui el nucleo escribe el cajon que cambio y solo ese: el
+        feedback general va a `params.feedback` y el de unidad a
+        `params.unidades[unidad]`. Mover la firma deja el paso obsoleto —
+        la etiqueta significa algo — y quien regenera sigue siendo la
+        persona, con el coste delante.
+        """
+        with lock_de(self.proyecto.id):
+            estado = self.todo()
+            ficha = estado["pasos"].setdefault(paso, {})
+            params = dict(ficha.get("params") or {})
+            for clave, valor in (extra or {}).items():
+                if (clave == "unidades" and isinstance(valor, dict)
+                        and isinstance(params.get("unidades"), dict)):
+                    mezcla = dict(params["unidades"])
+                    for unidad, ficha_u in valor.items():
+                        base = dict(mezcla.get(unidad) or {})
+                        base.update(ficha_u or {})
+                        mezcla[unidad] = base
+                    params["unidades"] = mezcla
+                else:
+                    params[clave] = valor
+            ficha["params"] = params
+            salidas = {p: self.sello_de(p) for p in padres_de(paso)}
+            ficha["firma_calculada"] = firma_de(paso, params, salidas)
+            escribir_json(self.proyecto.fichero_estado, estado)
+        return ficha
+
     def completar(self, paso: str, params: dict, datos, unidades: int = 0) -> int:
         """Un paso termino: escribe datos + manifiesto + estado.
 
@@ -249,7 +315,8 @@ class Estado:
                           "firma_calculada": manifiesto["firma"],
                           "sello_salida": _huella({"v": version,
                                                    "datos": _resumen_de(datos)}),
-                          "obsoleto_unidades": []})
+                          "obsoleto_unidades": [],
+                          "vale_unidades": []})
             # una version nueva no hereda la aprobacion (puerta de voz)
             ficha.pop("aprobacion", None)
             escribir_json(self.proyecto.fichero_estado, estado)
@@ -270,8 +337,14 @@ class Estado:
             else:
                 ficha = estado["pasos"].setdefault(paso, {})
                 marcadas = set(ficha.get("obsoleto_unidades", []))
-                marcadas.update(str(u) for u in unidades)
+                vales = set(ficha.get("vale_unidades", []))
+                for unidad in unidades:
+                    marcadas.add(str(unidad))
+                    # re-marcar tras un cambio RETIRA el «vale» anterior:
+                    # la tarjeta vuelve, que es lo que se quiere
+                    vales.discard(str(unidad))
                 ficha["obsoleto_unidades"] = sorted(marcadas)
+                ficha["vale_unidades"] = sorted(vales)
                 tocados = descendientes_de(paso)
             for nombre in tocados:
                 if nombre == paso and unidades is not None:
@@ -306,7 +379,8 @@ class Estado:
                           "firma": manifiesto.get("firma", ""),
                           "firma_calculada": manifiesto.get("firma", ""),
                           "sello_salida": sello,
-                          "obsoleto_unidades": []})
+                          "obsoleto_unidades": [],
+                          "vale_unidades": []})
             # revertir tampoco conserva la aprobacion: es otra version
             ficha.pop("aprobacion", None)
             escribir_json(self.proyecto.fichero_estado, estado)

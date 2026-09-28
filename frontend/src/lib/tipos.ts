@@ -103,11 +103,13 @@ export interface Plano {
   escena: string
   imagen: string
   prompt: string
+  cartela?: { plantilla: string; datos: Record<string, string>; por_que?: string } | null
 }
 
 export interface DatosAssets {
   planos: Plano[]
   calidad: string
+  cartelas?: number
 }
 
 export interface Rotulo {
@@ -119,6 +121,9 @@ export interface Rotulo {
 
 export interface DatosCallouts {
   rotulos: Rotulo[]
+  diseno?: string
+  paleta?: Paleta
+  subtitulo_tam?: string
 }
 
 export interface DatosRender {
@@ -293,6 +298,91 @@ export interface RespuestaFeedback {
   trabajo?: TrabajoFicha
 }
 
+/* ---------- grafismo por plano (Fase E) ---------- */
+
+/** Un plano resumido para los diálogos de grafismo (GET /{pid}/direccion). */
+export interface PlanoGrafismo {
+  id: string
+  titulo: string
+  narracion: string
+}
+
+export interface RespuestaPlan<T> {
+  plan: Record<string, T>
+  planos?: PlanoGrafismo[]
+  obsoletos?: string[]
+  tocados?: string[]
+  avisos?: string[]
+}
+
+/** Propuesta del agente de dirección (POST /{pid}/direccion/proponer). */
+export interface PropuestaDireccion extends RespuestaPlan<string> {
+  dirigidos: number
+}
+
+/** Propuesta del redactor de prompts (POST /{pid}/redactor/proponer). */
+export interface PropuestaRedactor extends RespuestaPlan<string> {
+  redactados: number
+}
+
+/** Una cartela decidida: plantilla + sus campos. */
+export interface FichaCartela {
+  plantilla: string
+  datos: Record<string, string>
+  por_que?: string
+}
+
+export interface PropuestaCartelas {
+  plan: Record<string, FichaCartela>
+  avisos: string[]
+  planos: number
+  cartelas: number
+  max_cartelas: number
+}
+
+/** Ficha de plantilla de cartela (campos y ejemplo). */
+export interface PlantillaCartela {
+  nombre: string
+  descripcion: string
+  campos: string[]
+  muestra: Record<string, string>
+}
+
+/** Respuesta de GET /{pid}/cartelas. */
+export interface FichaCartelas {
+  plan: Record<string, FichaCartela>
+  plantillas: Record<string, PlantillaCartela>
+  planos: PlanoGrafismo[]
+  max_cartelas: number
+  obsoletos: string[]
+}
+
+export interface Paleta {
+  acento: string
+  texto: string
+  fondo: string
+  velo: string
+}
+
+/** Set de diseño de rótulo. */
+export interface SetDiseno {
+  nombre: string
+  descripcion: string
+  caja: string
+}
+
+/** Respuesta de GET /{pid}/callouts/diseno. */
+export interface FichaDiseno {
+  sets: Record<string, SetDiseno>
+  elegido: string
+  sugerido: string
+  paleta: Paleta
+  fijados: Partial<Paleta>
+  tamanos: Record<string, number>
+  subtitulo_tam: string
+  obsoleto: boolean
+}
+
 /* ---------- auth y configuración ---------- */
 
 export interface EstadoAuth {
@@ -364,6 +454,9 @@ export const NOMBRES_PASOS: Record<string, string> = {
   render: "Vídeo",
   receta: "Receta",
   tanda: "Tanda",
+  direccion: "Dirección",
+  redactor: "Redactor",
+  cartelas: "Cartelas",
 }
 
 export const ORDEN_PASOS: IdPaso[] = [

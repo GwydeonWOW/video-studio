@@ -1,7 +1,7 @@
 /** Paneles de contenido para cada paso del pipeline. */
 import { useState } from "react"
 import { toast } from "sonner"
-import { AudioLines, BadgeCheck, Check, Loader2, PenLine, Play, RefreshCw } from "lucide-react"
+import { AudioLines, BadgeCheck, Check, Loader2, Palette, PenLine, Play, RefreshCw } from "lucide-react"
 import { api } from "../../lib/api"
 import { segundos } from "../../lib/utils"
 import { usarTrabajo } from "../../lib/trabajos"
@@ -36,6 +36,7 @@ import {
   DescripcionDialogo,
 } from "../../components/ui/dialogo"
 import { Vacio } from "./piezas"
+import { DialogoGrafismo, type PestanaGrafismo } from "./grafismo"
 
 export interface PropsPanel {
   pid: string
@@ -810,6 +811,8 @@ export function PanelAssets({
   alEjecutar,
   recargar,
 }: PropsPanel) {
+  const [grafismo_abierto, setGrafismoAbierto] = useState(false)
+  const [pestana_grafismo, setPestanaGrafismo] = useState<PestanaGrafismo>("direccion")
   if (ficha.estado === "vacio")
     return (
       <Vacio
@@ -820,13 +823,23 @@ export function PanelAssets({
   const datos = ficha.datos as DatosAssets
   const obsoletas = ficha.unidades_obsoletas ?? []
   const hay_obsoletas = obsoletas.length > 0
+  const cartelas = (datos.planos ?? []).filter((p) => p.cartela).length
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm text-muted-foreground">
           {datos.planos?.length ?? 0} planos · calidad {datos.calidad}
+          {cartelas > 0 && ` · ${cartelas} cartela(s) de texto`}
         </p>
+        <Boton
+          variante="secundario"
+          tamano="pequeno"
+          onClick={() => setGrafismoAbierto(true)}
+          title="Dirección, redactor, cartelas y diseño: qué se ve en cada plano"
+        >
+          <Palette /> Grafismo
+        </Boton>
         {hay_obsoletas && (
           <Boton
             variante="secundario"
@@ -848,18 +861,31 @@ export function PanelAssets({
                 obsoleto ? "ring-2 ring-amber-500" : ""
               }`}
             >
-              <img
-                src={`/a/${pid}/${plano.imagen}`}
-                alt={plano.escena}
-                title={plano.prompt}
-                className="aspect-video w-full bg-muted object-cover"
-                onError={(e) =>
-                  (e.currentTarget.style.visibility = "hidden")
-                }
-              />
+              {plano.cartela ? (
+                <img
+                  src={`/api/proyectos/${pid}/cartelas/vista?plano=${plano.escena}`}
+                  alt={`cartela ${plano.escena}`}
+                  title={`cartela ${plano.cartela.plantilla}`}
+                  className="aspect-video w-full bg-muted object-cover"
+                  onError={(e) =>
+                    (e.currentTarget.style.visibility = "hidden")
+                  }
+                />
+              ) : (
+                <img
+                  src={`/a/${pid}/${plano.imagen}`}
+                  alt={plano.escena}
+                  title={plano.prompt}
+                  className="aspect-video w-full bg-muted object-cover"
+                  onError={(e) =>
+                    (e.currentTarget.style.visibility = "hidden")
+                  }
+                />
+              )}
               <div className="flex items-center justify-between gap-2 p-2">
                 <span className="font-mono text-xs text-muted-foreground">
                   {plano.escena}
+                  {plano.cartela && " · cartela"}
                 </span>
                 <div className="flex items-center gap-1">
                   {obsoleto && (
@@ -911,13 +937,23 @@ export function PanelAssets({
           )
         })}
       </div>
+      <DialogoGrafismo
+        pid={pid}
+        abierto={grafismo_abierto}
+        alCambiar={setGrafismoAbierto}
+        pestana={pestana_grafismo}
+        alPestana={setPestanaGrafismo}
+        recargar={recargar}
+      />
     </div>
   )
 }
 
 /* ------------------------------------------------------------- 7 callouts */
 
-export function PanelCallouts({ ficha }: PropsPanel) {
+export function PanelCallouts({ pid, ficha, recargar }: PropsPanel) {
+  const [grafismo_abierto, setGrafismoAbierto] = useState(false)
+  const [pestana_grafismo, setPestanaGrafismo] = useState<PestanaGrafismo>("diseno")
   if (ficha.estado === "vacio")
     return (
       <Vacio
@@ -928,6 +964,20 @@ export function PanelCallouts({ ficha }: PropsPanel) {
   const datos = ficha.datos as DatosCallouts
   return (
     <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-muted-foreground">
+          {(datos.rotulos ?? []).length} rótulo(s)
+          {datos.diseno && ` · diseño «${datos.diseno}»`}
+        </p>
+        <Boton
+          variante="secundario"
+          tamano="pequeno"
+          onClick={() => setGrafismoAbierto(true)}
+          title="Sets de diseño, paleta y tamaño: un grafismo para todo el vídeo"
+        >
+          <Palette /> Diseño
+        </Boton>
+      </div>
       {(datos.rotulos ?? []).length === 0 && (
         <p className="text-sm text-muted-foreground">
           El paso decidió no poner rótulos.
@@ -943,8 +993,23 @@ export function PanelCallouts({ ficha }: PropsPanel) {
           <span className="ml-auto text-xs text-muted-foreground">
             {r.aparece.toFixed(1)}s → +{r.dura.toFixed(1)}s
           </span>
+          <img
+            src={`/api/proyectos/${pid}/callouts/vista?plano=${r.id}`}
+            alt={`rótulo ${r.id}`}
+            className="h-8 rounded bg-muted"
+            title="cómo se dibuja este rótulo"
+            onError={(e) => (e.currentTarget.style.display = "none")}
+          />
         </div>
       ))}
+      <DialogoGrafismo
+        pid={pid}
+        abierto={grafismo_abierto}
+        alCambiar={setGrafismoAbierto}
+        pestana={pestana_grafismo}
+        alPestana={setPestanaGrafismo}
+        recargar={recargar}
+      />
     </div>
   )
 }
