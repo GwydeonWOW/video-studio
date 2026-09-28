@@ -10,6 +10,7 @@ import {
   FolderOpen,
   AlertTriangle,
   Film,
+  Zap,
 } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
@@ -19,6 +20,7 @@ import {
   type EstiloCanal,
   type FichaProyecto,
   type InventarioPapelera,
+  type TrabajoFicha,
 } from "../lib/tipos"
 import { Boton } from "../components/ui/button"
 import { Insignia } from "../components/ui/badge"
@@ -65,6 +67,38 @@ export default function Galeria() {
   const [papelera, setPapelera] = useState<ProyectoPapelera[] | null>(null)
   const [crear_abierto, setCrearAbierto] = useState(false)
   const [papelera_abierta, setPapeleraAbierta] = useState(false)
+  const [seleccion, setSeleccion] = useState<Set<string>>(new Set())
+  const [tanda_tid, setTandaTid] = useState<string | null>(null)
+
+  const alternar_seleccion = (id: string) => {
+    setSeleccion((prev) => {
+      const nueva = new Set(prev)
+      if (nueva.has(id)) nueva.delete(id)
+      else nueva.add(id)
+      return nueva
+    })
+  }
+
+  const lanzar_tanda = async () => {
+    const ids = [...seleccion]
+    if (
+      !confirm(
+        `¿Correr lo pendiente en ${ids.length} vídeo(s)? Cada paso pendiente gasta lo que gasta su botón (la voz sigue esperando el guion aprobado).`,
+      )
+    )
+      return
+    try {
+      const t = await api.post<TrabajoFicha>("/api/proyectos/tanda", {
+        ids,
+        modo: "pendiente",
+      })
+      toast.success(`tanda en marcha (${ids.length} vídeos)`)
+      setSeleccion(new Set())
+      setTandaTid(t.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
 
   const cargar = useCallback(() => {
     api.get<FichaProyecto[]>("/api/proyectos").then(setProyectos).catch((e) => {
@@ -84,6 +118,25 @@ export default function Galeria() {
     cargar()
     cargar_papelera()
   }, [cargar, cargar_papelera])
+
+  /* la tanda no vive en ningún proyecto: la galería la sigue sondeando */
+  useEffect(() => {
+    if (!tanda_tid) return
+    const timer = setInterval(async () => {
+      try {
+        const t = await api.get<TrabajoFicha>(`/api/trabajos/${tanda_tid}`)
+        cargar()
+        if (t.estado === "hecho" || t.estado === "fallo" || t.estado === "cancelado") {
+          if (t.estado === "fallo") toast.error(`tanda falló: ${t.error}`)
+          else toast.success("tanda terminada")
+          setTandaTid(null)
+        }
+      } catch {
+        setTandaTid(null)
+      }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [tanda_tid, cargar])
 
   const borrar = async (p: FichaProyecto) => {
     if (!confirm(`¿Mover «${p.nombre}» a la papelera?`)) return
@@ -112,6 +165,17 @@ export default function Galeria() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Proyectos</h1>
         <div className="flex gap-2">
+          {seleccion.size > 0 && (
+            <Boton
+              variante="contorno"
+              tamano="pequeno"
+              title="Receta completa sobre los seleccionados: cada vídeo corre lo que le falta"
+              deshabilitado={!!tanda_tid}
+              onClick={lanzar_tanda}
+            >
+              <Zap /> Generar pendientes ({seleccion.size})
+            </Boton>
+          )}
           <Boton
             variante="contorno"
             tamano="pequeno"
@@ -127,6 +191,13 @@ export default function Galeria() {
           </Boton>
         </div>
       </div>
+
+      {tanda_tid && (
+        <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Tanda en marcha: la galería se refresca sola mientras trabaja.
+        </div>
+      )}
 
       {!proyectos ? (
         <div className="flex justify-center py-20 text-muted-foreground">
@@ -154,9 +225,19 @@ export default function Galeria() {
             >
               <CabeceraTarjeta>
                 <div className="flex items-start justify-between gap-2">
-                  <TituloTarjeta className="line-clamp-1">
-                    {p.nombre}
-                  </TituloTarjeta>
+                  <div className="flex min-w-0 items-start gap-2">
+                    <input
+                      type="checkbox"
+                      className="mt-1 shrink-0"
+                      title="Marcar para la tanda"
+                      checked={seleccion.has(p.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => alternar_seleccion(p.id)}
+                    />
+                    <TituloTarjeta className="line-clamp-1">
+                      {p.nombre}
+                    </TituloTarjeta>
+                  </div>
                   {p.activo ? (
                     <Insignia variante="aviso">
                       {NOMBRES_PASOS[p.activo.paso] ?? p.activo.paso}…

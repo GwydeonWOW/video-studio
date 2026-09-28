@@ -214,6 +214,85 @@ export interface Estadisticas {
   por_paso: Record<string, { n: number; media_s: number; mediana_s: number; max_s: number }>
 }
 
+/* ---------- recetas y previsualización (Fase C) ---------- */
+
+/** Tarea del tablero de receta (GET /{pid}/receta). */
+export interface RecetaTarea {
+  id: string
+  nombre: string
+  pestana: string
+  paso: string
+  necesita: string[]
+  cuesta: boolean
+  porque: string
+  estado: EstadoPaso
+  version: number
+  aprobado?: boolean
+}
+
+/** Tablero de la receta de un proyecto (qué falta, en qué pestaña). */
+export interface FichaReceta {
+  pestañas: Record<string, { nombre: string; tareas: RecetaTarea[] }>
+  activo: TrabajoFicha | null
+}
+
+/** Una escena de la previsualización (GET /{pid}/previsualizacion). */
+export interface EscenaPrevia {
+  id: string
+  titulo: string
+  narracion: string
+  imagen: string | null
+  audio: string | null
+  duracion: number
+  palabras: { palabra: string; inicio: number; fin: number }[]
+  rotulo: { texto: string; aparece: number; dura: number } | null
+}
+
+/** Las piezas para ver el vídeo sin montarlo (quien las junta es el navegador). */
+export interface Previsualizacion {
+  escenas: EscenaPrevia[]
+  duracion: number
+  resolucion: string
+  con_rotulos: boolean
+  montado: boolean
+  idioma: string
+}
+
+/* ---------- voz descrita y feedback (Fase B) ---------- */
+
+/** Propuesta de voz a partir de una descripción (POST /{pid}/voz/describir). */
+export interface PropuestaVoz {
+  voz: string
+  voz_nombre: string
+  voz_etiquetas?: Record<string, unknown>
+  modelo: string
+  estabilidad: number
+  similitud: number
+  velocidad: number
+  motivo: string
+  catalogo?: number
+}
+
+/** Resultado de la cata de voz (POST /{pid}/voz/previsualizar). */
+export interface PrevisualizacionVoz {
+  archivo: string
+  url: string
+  segundos: number
+  caracteres: number
+  duracion: number
+}
+
+/** Respuesta de POST /{pid}/feedback. */
+export interface RespuestaFeedback {
+  paso: string
+  unidad: string | null
+  nota: { id: string; fecha: string; texto: string }
+  afectadas: string[]
+  aguas_abajo: Record<string, string[]>
+  estado: EstadoPaso
+  trabajo?: TrabajoFicha
+}
+
 /* ---------- auth y configuración ---------- */
 
 export interface EstadoAuth {
@@ -283,6 +362,8 @@ export const NOMBRES_PASOS: Record<string, string> = {
   assets: "Imágenes",
   callouts: "Rótulos",
   render: "Vídeo",
+  receta: "Receta",
+  tanda: "Tanda",
 }
 
 export const ORDEN_PASOS: IdPaso[] = [

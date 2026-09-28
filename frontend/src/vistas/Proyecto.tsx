@@ -1,10 +1,10 @@
 /** Vista de un proyecto: pipeline de 8 pasos + seguimiento de trabajos. */
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
-import { ArrowLeft, BookOpen, ClipboardCopy, Loader2, MessageSquareHeart, Palette, Play, Settings2, Wallet } from "lucide-react"
+import { ArrowLeft, BookOpen, ChevronLeft, ChevronRight, ClipboardCopy, Eye, Loader2, MessageSquareHeart, Palette, Pause, Play, Settings2, Wallet, Zap } from "lucide-react"
 import { api } from "../lib/api"
-import { dolares } from "../lib/utils"
+import { dolares, segundos } from "../lib/utils"
 import {
   NOMBRES_PASOS,
   ORDEN_PASOS,
@@ -15,7 +15,9 @@ import {
   type FichaPaso,
   type FichaPasos,
   type FichaProyecto,
+  type FichaReceta,
   type IdPaso,
+  type Previsualizacion,
   type RespuestaFeedback,
   type TrabajoFicha,
 } from "../lib/tipos"
@@ -69,6 +71,8 @@ export default function Proyecto() {
   const [bitacora_abierta, setBitacoraAbierta] = useState(false)
   const [coste, setCoste] = useState<CosteProyecto | null>(null)
   const [coste_abierto, setCosteAbierto] = useState(false)
+  const [receta_abierta, setRecetaAbierta] = useState(false)
+  const [visor_abierto, setVisorAbierto] = useState(false)
 
   /* ------------------------------------------------------------ cargas */
 
@@ -299,6 +303,22 @@ export default function Proyecto() {
           <Boton
             variante="contorno"
             tamano="pequeno"
+            title="Ver el vídeo sin montarlo: la imagen y la voz de cada escena, al ritmo de quien mira"
+            onClick={() => setVisorAbierto(true)}
+          >
+            <Eye /> Mirar
+          </Boton>
+          <Boton
+            variante="contorno"
+            tamano="pequeno"
+            title="Lo que falta de una tirada: cada pestaña con su receta"
+            onClick={() => setRecetaAbierta(true)}
+          >
+            <Zap /> De una tirada
+          </Boton>
+          <Boton
+            variante="contorno"
+            tamano="pequeno"
             title="Desglose del coste, presupuesto y consumos"
             onClick={() => setCosteAbierto(true)}
           >
@@ -462,6 +482,23 @@ export default function Proyecto() {
         abierto={coste_abierto}
         alCerrar={() => setCosteAbierto(false)}
         alCambiar={cargar_coste}
+      />
+
+      <DialogoReceta
+        pid={pid}
+        abierto={receta_abierta}
+        alCerrar={() => setRecetaAbierta(false)}
+        ocupado={ocupado}
+        alSeguir={(nuevo_tid) => {
+          setTid(nuevo_tid)
+          setEstadoTrabajo("en_cola")
+        }}
+      />
+
+      <DialogoVisor
+        pid={pid}
+        abierto={visor_abierto}
+        alCerrar={() => setVisorAbierto(false)}
       />
     </div>
   )
@@ -978,6 +1015,326 @@ function DialogoCoste({
                 <ClipboardCopy /> Copiar bitácora
               </Boton>
             </div>
+          </div>
+        )}
+      </ContenidoDialogo>
+    </Dialogo>
+  )
+}
+
+/* ---------------------------------------------------------------- receta */
+
+function DialogoReceta({
+  pid,
+  abierto,
+  alCerrar,
+  ocupado,
+  alSeguir,
+}: {
+  pid: string
+  abierto: boolean
+  alCerrar: () => void
+  ocupado: boolean
+  alSeguir: (tid: string) => void
+}) {
+  const [ficha, setFicha] = useState<FichaReceta | null>(null)
+
+  useEffect(() => {
+    if (!abierto) return
+    setFicha(null)
+    api
+      .get<FichaReceta>(`/api/proyectos/${pid}/receta`)
+      .then(setFicha)
+      .catch(() => setFicha(null))
+  }, [abierto, pid])
+
+  const lanzar = async (pestana: string, modo: "pendiente" | "todo") => {
+    try {
+      const t = await api.post<TrabajoFicha>(
+        `/api/proyectos/${pid}/receta/${pestana}`,
+        { modo },
+      )
+      toast.success(`receta en marcha (${modo})`)
+      alCerrar()
+      alSeguir(t.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  return (
+    <Dialogo abierto={abierto} alCambiar={(a) => (a ? null : alCerrar())}>
+      <ContenidoDialogo className="max-w-2xl">
+        <CabeceraDialogo>
+          <TituloDialogo>De una tirada</TituloDialogo>
+          <DescripcionDialogo>
+            Lo que en pantallas son muchos botones en el orden correcto, aquí
+            es una lista. Cada paso sigue teniendo su botón, su ficha y su
+            revisión: la receta no esconde nada, adelanta trabajo. La voz no
+            se graba sin el guion aprobado.
+          </DescripcionDialogo>
+        </CabeceraDialogo>
+        {!ficha ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {Object.entries(ficha.pestañas).map(([clave, pestana]) => {
+              const pendientes = pestana.tareas.filter(
+                (t) => t.estado !== "ok",
+              ).length
+              return (
+                <div key={clave} className="rounded-md border p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold">{pestana.nombre}</p>
+                    {pendientes > 0 ? (
+                      <Insignia variante="aviso">
+                        {pendientes} pendiente{pendientes > 1 ? "s" : ""}
+                      </Insignia>
+                    ) : (
+                      <Insignia variante="exito">al día</Insignia>
+                    )}
+                    <div className="ml-auto flex gap-2">
+                      <Boton
+                        tamano="pequeno"
+                        deshabilitado={ocupado || pendientes === 0}
+                        title="Corre lo que falta y se salta lo que ya está al día"
+                        onClick={() => lanzar(clave, "pendiente")}
+                      >
+                        Generar lo pendiente
+                      </Boton>
+                      <Boton
+                        tamano="pequeno"
+                        variante="contorno"
+                        deshabilitado={ocupado}
+                        title="Lo corre todo, aunque esté al día (paga otra vez)"
+                        onClick={() => lanzar(clave, "todo")}
+                      >
+                        Generar todo
+                      </Boton>
+                    </div>
+                  </div>
+                  <ul className="mt-2 space-y-1.5">
+                    {pestana.tareas.map((t) => (
+                      <li
+                        key={t.id}
+                        className="flex flex-wrap items-center gap-2 text-xs"
+                      >
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${
+                            t.estado === "ok"
+                              ? "bg-emerald-500"
+                              : t.estado === "obsoleto"
+                                ? "bg-amber-500"
+                                : "bg-muted-foreground/25"
+                          }`}
+                        />
+                        <span className="font-medium">{t.nombre}</span>
+                        {t.cuesta && (
+                          <span
+                            title="gasta dinero al correr"
+                            className="text-amber-600"
+                          >
+                            ¢
+                          </span>
+                        )}
+                        {t.estado === "obsoleto" && (
+                          <Insignia variante="aviso">obsoleto</Insignia>
+                        )}
+                        {t.aprobado && <Insignia variante="exito">✓</Insignia>}
+                        <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                          {t.porque}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </ContenidoDialogo>
+    </Dialogo>
+  )
+}
+
+/* ---------------------------------------------------------- previsualizar */
+
+function DialogoVisor({
+  pid,
+  abierto,
+  alCerrar,
+}: {
+  pid: string
+  abierto: boolean
+  alCerrar: () => void
+}) {
+  const [datos, setDatos] = useState<Previsualizacion | null>(null)
+  const [indice, setIndice] = useState(0)
+  const [seguido, setSeguido] = useState(false)
+  const [t_audio, setTAudio] = useState(0)
+  const audio_ref = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => {
+    if (!abierto) return
+    setDatos(null)
+    setIndice(0)
+    setSeguido(false)
+    api
+      .get<Previsualizacion>(`/api/proyectos/${pid}/previsualizacion`)
+      .then(setDatos)
+      .catch((e) => {
+        toast.error(String((e as Error).message ?? e))
+        alCerrar()
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [abierto, pid])
+
+  const escena = datos?.escenas[indice]
+  const ultima = datos ? indice >= datos.escenas.length - 1 : true
+
+  // al cambiar de escena: rebobinar el reloj y seguir si iba seguido
+  useEffect(() => {
+    setTAudio(0)
+    const audio = audio_ref.current
+    if (!audio || !escena?.audio) return
+    if (seguido) audio.play().catch(() => setSeguido(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [indice])
+
+  const al_terminar_audio = () => {
+    if (seguido && !ultima) setIndice(indice + 1)
+    else setSeguido(false)
+  }
+
+  const alternar = () => {
+    const audio = audio_ref.current
+    if (!audio) return
+    if (seguido && !audio.paused) {
+      setSeguido(false)
+      audio.pause()
+    } else {
+      setSeguido(true)
+      audio.play().catch(() => {})
+    }
+  }
+
+  const rotulo_visible =
+    escena?.rotulo != null &&
+    t_audio >= escena.rotulo.aparece &&
+    t_audio < escena.rotulo.aparece + escena.rotulo.dura
+
+  return (
+    <Dialogo abierto={abierto} alCambiar={(a) => (a ? null : alCerrar())}>
+      <ContenidoDialogo className="max-w-3xl">
+        <CabeceraDialogo>
+          <TituloDialogo>Mirar sin montar</TituloDialogo>
+          <DescripcionDialogo>
+            El vídeo antes de montarlo: la imagen y la voz de cada escena, al
+            ritmo de quien mira. El rótulo es texto de verdad (como se verá);
+            el zoom y los cortes sólo se ven en el MP4.
+          </DescripcionDialogo>
+        </CabeceraDialogo>
+        {!datos || !escena ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div
+              className="relative overflow-hidden rounded-md bg-black"
+              style={{ aspectRatio: "16 / 9" }}
+            >
+              {escena.imagen ? (
+                <img
+                  src={`/a/${pid}/${escena.imagen}`}
+                  alt={escena.titulo || escena.id}
+                  className="h-full w-full object-contain"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-white/60">
+                  sin imagen para esta escena (genera las imágenes)
+                </div>
+              )}
+              {rotulo_visible && escena.rotulo && (
+                <div className="pointer-events-none absolute inset-x-0 bottom-10 flex justify-center px-6">
+                  <span className="rounded-2xl bg-black/75 px-6 py-3 text-lg font-semibold text-white">
+                    {escena.rotulo.texto}
+                  </span>
+                </div>
+              )}
+              <span className="absolute left-2 top-2 rounded bg-black/60 px-2 py-0.5 text-xs text-white">
+                {indice + 1}/{datos.escenas.length} · {escena.id}
+              </span>
+            </div>
+
+            <audio
+              ref={audio_ref}
+              src={escena.audio ? `/a/${pid}/${escena.audio}` : undefined}
+              onTimeUpdate={(e) => setTAudio(e.currentTarget.currentTime)}
+              onEnded={al_terminar_audio}
+              controls
+              className="w-full"
+            />
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Boton
+                variante="contorno"
+                tamano="icono"
+                title="Escena anterior"
+                deshabilitado={indice === 0}
+                onClick={() => setIndice(indice - 1)}
+              >
+                <ChevronLeft />
+              </Boton>
+              <Boton
+                variante="contorno"
+                tamano="icono"
+                title="Escena siguiente"
+                deshabilitado={ultima}
+                onClick={() => setIndice(indice + 1)}
+              >
+                <ChevronRight />
+              </Boton>
+              <Boton
+                tamano="pequeno"
+                onClick={alternar}
+                deshabilitado={!escena.audio}
+              >
+                {seguido ? (
+                  <>
+                    <Pause /> Parar
+                  </>
+                ) : (
+                  <>
+                    <Play /> Seguir seguido
+                  </>
+                )}
+              </Boton>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {segundos(escena.duracion)} · total {segundos(datos.duracion)}
+                {datos.montado && " · MP4 listo"}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap gap-1">
+              {datos.escenas.map((e, i) => (
+                <button
+                  key={e.id}
+                  onClick={() => setIndice(i)}
+                  className={`rounded px-2 py-0.5 font-mono text-xs ${
+                    i === indice
+                      ? "bg-secondary font-semibold"
+                      : "text-muted-foreground hover:bg-secondary/60"
+                  }`}
+                >
+                  {e.id}
+                </button>
+              ))}
+            </div>
+
+            <p className="text-sm text-muted-foreground">{escena.narracion}</p>
           </div>
         )}
       </ContenidoDialogo>

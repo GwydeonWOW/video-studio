@@ -24,8 +24,10 @@ from ..nucleo import estilo
 from ..nucleo import coste as nucleo_coste
 from ..nucleo.coste import de_proyecto
 from ..nucleo.estado import GRAFO, Estado, descendientes_de
+from ..nucleo import recetas
 from ..nucleo.proyecto import (Proyecto, ahora, id_valido, leer_json,
                                leer_jsonl, lock_de)
+from ..nucleo.trabajos import TrabajoCancelado
 from ..pasos import p3_guion, p4_voz, p6_assets, registro
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
@@ -312,6 +314,193 @@ def aplicar_estilo(pid: str) -> dict:
     obsoletos = sorted(p for p in afectados if estado.estado_de(p) != "vacio")
     return {"pasos": tocados, "obsoletos_al_regenerar": obsoletos,
             "estilo": estilo_canal}
+
+
+# ------------------------------------------------------------------ recetas
+# La tubería de una tirada: lo que en pantallas son muchos botones en el
+# orden correcto, aquí es una lista de tareas con sus dependencias. La
+# TABLA vive en nucleo/recetas.py; aquí vive el código, que reutiliza el
+# MISMO camino que el botón de cada paso (`_correr`): versión nueva,
+# bitácora y firma. Una receta no esconde nada: adelanta trabajo.
+
+@router.get("/recetas", dependencies=[_SESION])
+def tablero_recetas() -> dict:
+    """La tabla de tareas (para pintar la pantalla sin cargar nada más)."""
+    return {"pestañas": recetas.PESTANAS, "tareas": recetas.TAREAS}
+
+
+def _correr_receta(proyecto: Proyecto, tareas: list[str], modo: str,
+                   trabajo) -> dict:
+    """Corre una lista de tareas de una tirada. -> {hechos, saltados, paro}
+
+    En modo 'pendiente' se salta lo que ya está hecho y al día. La receta
+    se PARA (sin fallo) ante la puerta del guion: grabar la voz sin
+    aprobación es gastar ElevenLabs en un guion que sigue en revisión.
+    """
+    hechos, saltados, paro = [], [], None
+    for tid in tareas:
+        tarea = recetas.TAREAS_POR_ID[tid]
+        paso = tarea["paso"]
+        estado = Estado(proyecto)
+        trabajo.comprobar_cancelacion()
+        if modo == "pendiente" and estado.estado_de(paso) == "ok":
+            trabajo.avance(f"{paso}: ya está al día, se salta")
+            saltados.append(paso)
+            continue
+        if paso == "voz" and not estado.esta_aprobado("guion"):
+            trabajo.avance("parada: aprueba el guion antes de grabar la voz")
+            paro = "guion_sin_aprobar"
+            break
+        trabajo.avance(f"— {tarea['nombre']}")
+        params = estado.paso(paso).get("params") or \
+            registro.params_defecto_de(paso)
+        _correr(proyecto, paso, params, [])(trabajo)
+        hechos.append(paso)
+    return {"tareas": tareas, "modo": modo, "hechos": hechos,
+            "saltados": saltados, "paro": paro}
+
+
+@router.get("/{pid}/receta", dependencies=[_SESION])
+def ficha_receta(pid: str) -> dict:
+    """El tablero de la receta: cada tarea con su estado real."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    pestañas = {}
+    for clave, titulo in recetas.PESTANAS.items():
+        tareas = []
+        for t in recetas.TAREAS:
+            if t["pestana"] != clave:
+                continue
+            ficha = estado.paso(t["paso"])
+            tareas.append({**t, "estado": estado.estado_de(t["paso"]),
+                           "version": ficha.get("version", 0),
+                           "aprobado": bool(ficha.get("aprobado"))})
+        pestañas[clave] = {"nombre": titulo, "tareas": tareas}
+    return {"pestañas": pestañas, "activo": GESTOR.activo_de(pid)}
+
+
+@router.post("/{pid}/receta/{pestana}", status_code=202, dependencies=_MUTAR)
+def correr_receta(pid: str, pestana: str, cuerpo: dict | None = None) -> dict:
+    """Lanza la receta de UNA pestaña como trabajo en segundo plano."""
+    proyecto = _proyecto_o_404(pid)
+    if pestana not in recetas.PESTANAS:
+        raise HTTPException(404, f"no hay pestaña {pestana}")
+    try:
+        modo = recetas.validar_modo((cuerpo or {}).get("modo"))
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    if pestana in ("voz", "montaje") and GESTOR.activo_de(pid):
+        raise HTTPException(409, "ya hay un trabajo en marcha en este proyecto")
+    tareas = recetas.tareas_de(pestana)
+    lanzado = GESTOR.lanzar(pid, "receta",
+                            lambda t: _correr_receta(proyecto, tareas,
+                                                     modo, t))
+    proyecto.bitacora("receta_lanzada", {"pestaña": pestana, "modo": modo,
+                                         "trabajo": lanzado.id})
+    return GESTOR.estado(lanzado.id)
+
+
+@router.post("/tanda", status_code=202, dependencies=_MUTAR)
+def lanzar_tanda(cuerpo: dict | None = None) -> dict:
+    """Receta COMPLETA sobre VARIOS vídeos de una vez (la galería).
+
+    Un solo trabajo que los recorre en orden. El que falla no tumba la
+    tanda: se anota y se sigue con el siguiente.
+    """
+    cuerpo = cuerpo or {}
+    ids = [str(i) for i in cuerpo.get("ids") or []]
+    if not ids:
+        raise HTTPException(400, "la tanda necesita ids de proyectos")
+    try:
+        modo = recetas.validar_modo(cuerpo.get("modo"))
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    proyectos = {pid: _proyecto_o_404(pid) for pid in ids}
+    ocupados = [pid for pid in ids if GESTOR.activo_de(pid)]
+    if ocupados:
+        raise HTTPException(409, "hay trabajos en marcha en: "
+                                 + ", ".join(ocupados))
+
+    def funcion(trabajo):
+        resultados = []
+        for pid, proyecto in proyectos.items():
+            trabajo.comprobar_cancelacion()
+            trabajo.avance(f"=== {proyecto.leer().get('nombre', pid)} ===")
+            try:
+                ficha = _correr_receta(proyecto, recetas.COMPLETA, modo,
+                                       trabajo)
+            except TrabajoCancelado:
+                raise
+            except Exception as fallo:                  # noqa: BLE001
+                trabajo.avance(f"{pid} falló: {fallo} — se sigue")
+                resultados.append({"proyecto": pid, "error": str(fallo)})
+            else:
+                resultados.append({"proyecto": pid, **ficha})
+        return {"modo": modo, "proyectos": resultados}
+
+    lanzado = GESTOR.lanzar("__tanda", "tanda", funcion)
+    return GESTOR.estado(lanzado.id)
+
+
+@router.get("/{pid}/previsualizacion", dependencies=[_SESION])
+def leer_previsualizacion(pid: str) -> dict:
+    """Las piezas para ver el vídeo sin montarlo. -> {escenas, ...}
+
+    ESTE ENDPOINT NO MONTA NADA, y ahí está la gracia: devuelve las
+    piezas sueltas —la imagen de cada escena, su audio y su rótulo con
+    su ventana temporal— y quien las junta es el navegador, que además
+    las junta mejor que el render para esto (el rótulo es texto de
+    verdad y cambiar de escena es mover el currentTime de un <audio>).
+
+    Escena a escena se oye la VOZ y nada más: lo que se juzga ahí es si
+    la imagen cuadra con lo que se dice, y una cama de música es justo
+    lo que tapa esa pregunta.
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    voz = estado.datos_de("voz") or {}
+    if not voz.get("escenas"):
+        raise HTTPException(409, "todavía no hay locución: genera la voz "
+                                 "antes de poder mirar el vídeo")
+    assets = estado.datos_de("assets") or {}
+    callouts = estado.datos_de("callouts") or {}
+    guion = estado.datos_de("guion") or {}
+    planos_de = {p.get("escena"): p for p in assets.get("planos", [])}
+    rotulos_de = {r.get("id"): r for r in callouts.get("rotulos", [])}
+    titulo_de = {e.get("id"): e.get("titulo", "")
+                 for e in guion.get("escenas", [])}
+    narracion_de = {e.get("id"): e.get("narracion", "")
+                    for e in guion.get("escenas", [])}
+    escenas = []
+    for escena in voz["escenas"]:
+        sid = str(escena.get("id") or "")
+        plano = planos_de.get(sid) or {}
+        imagen = plano.get("imagen")
+        if not imagen or not proyecto.ruta(str(imagen)).exists():
+            imagen = None
+        rotulo = rotulos_de.get(sid)
+        escenas.append({
+            "id": sid,
+            "titulo": titulo_de.get(sid, ""),
+            "narracion": narracion_de.get(sid, ""),
+            "imagen": imagen,
+            "audio": escena.get("audio"),
+            "duracion": round(float(escena.get("duracion") or 0.0), 3),
+            "palabras": escena.get("palabras") or [],
+            "rotulo": ({"texto": str(rotulo.get("texto", "")),
+                        "aparece": round(float(rotulo.get("aparece", 0.0)), 2),
+                        "dura": round(float(rotulo.get("dura", 4.0)), 2)}
+                       if rotulo else None),
+        })
+    render_params = estado.paso("render").get("params") or {}
+    return {
+        "escenas": escenas,
+        "duracion": round(sum(e["duracion"] for e in escenas), 2),
+        "resolucion": str(render_params.get("resolucion", "1920x1080")),
+        "con_rotulos": bool(callouts.get("rotulos")),
+        "montado": proyecto.ruta("pasos/render/final.mp4").exists(),
+        "idioma": str(proyecto.leer().get("idioma", "es")),
+    }
 
 
 # ------------------------------------------------------------------ elemento
