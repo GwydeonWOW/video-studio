@@ -21,6 +21,7 @@ export interface FichaProyecto {
   actualizado: string
   pasos: Record<string, { estado: EstadoPaso; version: number }>
   coste: number
+  presupuesto?: number | null
   activo: TrabajoFicha | null
 }
 
@@ -169,6 +170,48 @@ export interface EntradaBitacora {
   t: string
   evento: string
   [detalle: string]: unknown
+}
+
+/** Ficha de coste de un proyecto (GET /{pid}/coste), con presupuesto. */
+export interface CosteProyecto extends CosteTotal {
+  presupuesto: number | null
+  aviso: boolean
+}
+
+/** Reparto de consumos por paso (GET /{pid}/coste/por-paso). */
+export interface CostePorPaso {
+  [paso: string]: { operaciones: number; coste: number }
+}
+
+/** Un consumo anotado (GET /{pid}/coste/eventos). */
+export interface EventoCoste {
+  t: string
+  operacion: string
+  proveedor: string
+  modelo: string
+  coste: number
+  contexto: string
+  paso?: string
+  unidad?: string
+  [detalle: string]: unknown
+}
+
+/** Inventario de un proyecto apartado (GET /papelera/{carpeta}). */
+export interface InventarioPapelera {
+  carpeta: string
+  id: string
+  nombre: string
+  ficheros: number
+  peso: number
+  por_carpeta: Record<string, { ficheros: number; peso: number; nombres: string[] }>
+  videos: { nombre: string; peso: number }[]
+}
+
+/** Tiempos reales por paso entre todos los proyectos (GET /api/estadisticas). */
+export interface Estadisticas {
+  proyectos: number
+  corridas: number
+  por_paso: Record<string, { n: number; media_s: number; mediana_s: number; max_s: number }>
 }
 
 /* ---------- auth y configuración ---------- */

@@ -2,13 +2,16 @@
 import { useCallback, useEffect, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
-import { ArrowLeft, BookOpen, Loader2, Palette, Play, Settings2 } from "lucide-react"
+import { ArrowLeft, BookOpen, ClipboardCopy, Loader2, Palette, Play, Settings2, Wallet } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
 import {
   NOMBRES_PASOS,
   ORDEN_PASOS,
+  type CostePorPaso,
+  type CosteProyecto,
   type EntradaBitacora,
+  type EventoCoste,
   type FichaPaso,
   type FichaPasos,
   type FichaProyecto,
@@ -62,6 +65,8 @@ export default function Proyecto() {
   const [estado_trabajo, setEstadoTrabajo] = useState<string | null>(null)
   const [bitacora, setBitacora] = useState<EntradaBitacora[] | null>(null)
   const [bitacora_abierta, setBitacoraAbierta] = useState(false)
+  const [coste, setCoste] = useState<CosteProyecto | null>(null)
+  const [coste_abierto, setCosteAbierto] = useState(false)
 
   /* ------------------------------------------------------------ cargas */
 
@@ -112,6 +117,13 @@ export default function Proyecto() {
     [pid, pasos]
   )
 
+  const cargar_coste = useCallback(() => {
+    api
+      .get<CosteProyecto>(`/api/proyectos/${pid}/coste`)
+      .then(setCoste)
+      .catch(() => {})
+  }, [pid])
+
   useEffect(() => {
     setProyecto(null)
     setPasos(null)
@@ -126,12 +138,28 @@ export default function Proyecto() {
       }
       await cargar_pasos()
     })()
-  }, [cargar_proyecto, cargar_pasos])
+    cargar_coste()
+  }, [cargar_proyecto, cargar_pasos, cargar_coste])
 
   useEffect(() => {
     if (pasos) cargar_ficha(paso, pasos)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paso, pasos])
+
+  /* coste en vivo: mientras corre un trabajo, escuchar el flujo SSE */
+  const trabajando =
+    tid !== null &&
+    (estado_trabajo === "en_cola" || estado_trabajo === "ejecutando")
+  useEffect(() => {
+    if (!trabajando) return
+    const fuente = new EventSource(`/api/proyectos/${pid}/coste/flujo`)
+    const al_coste = (e: MessageEvent) => {
+      const d = JSON.parse(e.data) as Partial<CosteProyecto>
+      setCoste((prev) => (prev ? { ...prev, ...d } : prev))
+    }
+    fuente.addEventListener("coste", al_coste as EventListener)
+    return () => fuente.close()
+  }, [trabajando, pid])
 
   useEffect(() => {
     if (!bitacora_abierta || bitacora) return
@@ -175,9 +203,10 @@ export default function Proyecto() {
       else if (final.estado === "fallo")
         toast.error(final.error || "el trabajo falló")
       else if (final.estado === "cancelado") toast("trabajo cancelado")
+      cargar_coste()
       recargar_todo(final.paso)
     },
-    [recargar_todo]
+    [recargar_todo, cargar_coste]
   )
 
   const renombrar = async (nombre: string, canal: string, idioma: string) => {
@@ -250,10 +279,29 @@ export default function Proyecto() {
           </h1>
           <p className="text-xs text-muted-foreground">
             {[proyecto.canal, proyecto.idioma].filter(Boolean).join(" · ")} ·{" "}
-            {dolares(coste_proyecto)} gastados
+            <button
+              className="underline decoration-dotted underline-offset-2"
+              title="Ver el desglose del coste"
+              onClick={() => setCosteAbierto(true)}
+            >
+              {dolares(coste?.coste ?? coste_proyecto)} gastados
+              {coste?.presupuesto != null &&
+                ` de ${dolares(coste.presupuesto)}`}
+            </button>{" "}
+            {coste?.aviso && (
+              <Insignia variante="destructivo">presupuesto rebasado</Insignia>
+            )}
           </p>
         </div>
         <div className="ml-auto flex gap-2">
+          <Boton
+            variante="contorno"
+            tamano="pequeno"
+            title="Desglose del coste, presupuesto y consumos"
+            onClick={() => setCosteAbierto(true)}
+          >
+            <Wallet /> Coste
+          </Boton>
           <Boton
             variante="contorno"
             tamano="pequeno"
@@ -393,6 +441,13 @@ export default function Proyecto() {
         alCerrar={() => setBitacoraAbierta(false)}
         entradas={bitacora}
         alAbrir={() => setBitacora(null)}
+      />
+
+      <DialogoCoste
+        pid={pid}
+        abierto={coste_abierto}
+        alCerrar={() => setCosteAbierto(false)}
+        alCambiar={cargar_coste}
       />
     </div>
   )
@@ -541,6 +596,237 @@ function DialogoBitacora({
             })
           )}
         </div>
+      </ContenidoDialogo>
+    </Dialogo>
+  )
+}
+
+/* ----------------------------------------------------------------- coste */
+
+function DialogoCoste({
+  pid,
+  abierto,
+  alCerrar,
+  alCambiar,
+}: {
+  pid: string
+  abierto: boolean
+  alCerrar: () => void
+  alCambiar: () => void
+}) {
+  const [ficha, setFicha] = useState<CosteProyecto | null>(null)
+  const [por_paso, setPorPaso] = useState<CostePorPaso | null>(null)
+  const [eventos, setEventos] = useState<EventoCoste[] | null>(null)
+  const [presupuesto, setPresupuesto] = useState("")
+  const [guardando, setGuardando] = useState(false)
+
+  useEffect(() => {
+    if (!abierto) return
+    setFicha(null)
+    setPorPaso(null)
+    setEventos(null)
+    api
+      .get<CosteProyecto>(`/api/proyectos/${pid}/coste`)
+      .then((r) => {
+        setFicha(r)
+        setPresupuesto(r.presupuesto != null ? String(r.presupuesto) : "")
+      })
+      .catch(() => setFicha(null))
+    api.get<CostePorPaso>(`/api/proyectos/${pid}/coste/por-paso`)
+      .then(setPorPaso)
+      .catch(() => setPorPaso({}))
+    api
+      .get<EventoCoste[]>(`/api/proyectos/${pid}/coste/eventos?limite=100`)
+      .then(setEventos)
+      .catch(() => setEventos([]))
+  }, [abierto, pid])
+
+  const guardar_presupuesto = async (valor: string | null) => {
+    setGuardando(true)
+    try {
+      const cuerpo = valor === null ? { presupuesto: null } : { presupuesto: Number(valor.replace(",", ".")) }
+      const r = await api.put<CosteProyecto>(
+        `/api/proyectos/${pid}/coste/presupuesto`,
+        cuerpo,
+      )
+      setFicha((prev) => (prev ? { ...prev, ...r } : r))
+      setPresupuesto(r.presupuesto != null ? String(r.presupuesto) : "")
+      toast.success(
+        r.presupuesto == null
+          ? "presupuesto quitado"
+          : "presupuesto guardado: avisará al rebasarlo",
+      )
+      alCambiar()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setGuardando(false)
+    }
+  }
+
+  const copiar_bitacora = async () => {
+    try {
+      const r = await api.get<{ texto: string; eventos: number }>(
+        `/api/proyectos/${pid}/bitacora/llm`,
+      )
+      await navigator.clipboard.writeText(r.texto)
+      toast.success(`bitácora copiada (${r.eventos} eventos)`)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  const pasos_ordenados = por_paso
+    ? Object.entries(por_paso).sort((a, b) => b[1].coste - a[1].coste)
+    : []
+
+  return (
+    <Dialogo abierto={abierto} alCambiar={(a) => (a ? null : alCerrar())}>
+      <ContenidoDialogo className="max-w-2xl">
+        <CabeceraDialogo>
+          <TituloDialogo>Coste del proyecto</TituloDialogo>
+          <DescripcionDialogo>
+            Cada consumo apuntado al gastarse. El presupuesto solo avisa: no
+            corta nada.
+          </DescripcionDialogo>
+        </CabeceraDialogo>
+
+        {!ficha ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {/* resumen */}
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="rounded-md border p-3">
+                <p className="text-lg font-semibold">{dolares(ficha.coste)}</p>
+                <p className="text-xs text-muted-foreground">total</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-lg font-semibold">{ficha.operaciones}</p>
+                <p className="text-xs text-muted-foreground">operaciones</p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="text-lg font-semibold">
+                  {ficha.presupuesto != null ? dolares(ficha.presupuesto) : "—"}
+                </p>
+                <p className="text-xs text-muted-foreground">presupuesto</p>
+              </div>
+            </div>
+            {ficha.aviso && (
+              <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm">
+                El gasto ya rebasa el presupuesto fijado.
+              </p>
+            )}
+
+            {/* por paso */}
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">Reparto por paso</p>
+              {pasos_ordenados.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  todavía no hay consumos
+                </p>
+              ) : (
+                pasos_ordenados.map(([paso, info]) => (
+                  <div key={paso} className="flex items-center gap-2 text-xs">
+                    <span className="w-32 shrink-0 truncate">
+                      {NOMBRES_PASOS[paso] ?? paso}
+                    </span>
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary/70"
+                        style={{
+                          width: `${
+                            ficha.coste > 0
+                              ? Math.max(2, (info.coste / ficha.coste) * 100)
+                              : 0
+                          }%`,
+                        }}
+                      />
+                    </div>
+                    <span className="w-24 shrink-0 text-right tabular-nums">
+                      {dolares(info.coste)} · {info.operaciones} op.
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* últimos consumos */}
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">Últimos consumos</p>
+              <div className="max-h-40 space-y-1 overflow-y-auto font-mono text-xs">
+                {!eventos || eventos.length === 0 ? (
+                  <p className="text-muted-foreground">sin consumos aún</p>
+                ) : (
+                  [...eventos].reverse().map((e, i) => (
+                    <p key={i} className="flex gap-2">
+                      <span className="shrink-0 text-muted-foreground">
+                        {new Date(e.t).toLocaleTimeString()}
+                      </span>
+                      <span className="w-28 shrink-0 truncate" title={e.contexto}>
+                        {e.paso ?? e.contexto}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                        {[e.proveedor, e.modelo].filter(Boolean).join("/")}
+                        {e.operacion === "llm"
+                          ? ` · ${e.entrada}→${e.salida} tok`
+                          : ""}
+                      </span>
+                      <span className="shrink-0 tabular-nums">
+                        {dolares(e.coste)}
+                      </span>
+                    </p>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* presupuesto */}
+            <div className="flex flex-wrap items-end gap-2 rounded-md border p-3">
+              <div className="space-y-1">
+                <Etiqueta htmlFor="presupuesto">
+                  Presupuesto (USD, solo avisa)
+                </Etiqueta>
+                <Entrada
+                  id="presupuesto"
+                  tipo="number"
+                  min="0"
+                  paso="0.5"
+                  placeholder="sin límite"
+                  valor={presupuesto}
+                  alCambiar={(e) => setPresupuesto(e.target.value)}
+                  className="w-32"
+                />
+              </div>
+              <Boton
+                tamano="pequeno"
+                deshabilitado={guardando || presupuesto.trim() === ""}
+                onClick={() => guardar_presupuesto(presupuesto)}
+              >
+                Fijar
+              </Boton>
+              <Boton
+                variante="contorno"
+                tamano="pequeno"
+                deshabilitado={guardando || ficha.presupuesto == null}
+                onClick={() => guardar_presupuesto(null)}
+              >
+                Quitar
+              </Boton>
+              <Boton
+                variante="fantasma"
+                tamano="pequeno"
+                className="ml-auto"
+                title="Copiar la bitácora entera como texto para pegársela a un LLM"
+                onClick={copiar_bitacora}
+              >
+                <ClipboardCopy /> Copiar bitácora
+              </Boton>
+            </div>
+          </div>
+        )}
       </ContenidoDialogo>
     </Dialogo>
   )

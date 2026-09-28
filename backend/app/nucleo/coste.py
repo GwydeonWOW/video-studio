@@ -125,3 +125,19 @@ def global_(datos_dir: Path) -> dict:
 
 def de_proyecto(proyecto_dir: Path) -> dict:
     return total_de(leer_jsonl(Path(proyecto_dir) / "coste.jsonl"))
+
+
+def eventos_de(proyecto_dir: Path) -> list[dict]:
+    """Detalle de cada consumo, del mas antiguo al mas reciente."""
+    return leer_jsonl(Path(proyecto_dir) / "coste.jsonl")
+
+
+def por_paso(entradas: list[dict]) -> dict:
+    """Reparte los consumos por paso leyendo el contexto «paso[:unidad]»."""
+    salida: dict[str, dict] = {}
+    for entrada in entradas:
+        paso = str(entrada.get("contexto", "")).split(":", 1)[0] or "?"
+        ficha = salida.setdefault(paso, {"operaciones": 0, "coste": 0.0})
+        ficha["operaciones"] += 1
+        ficha["coste"] = round(ficha["coste"] + float(entrada.get("coste", 0)), 6)
+    return dict(sorted(salida.items(), key=lambda kv: -kv[1]["coste"]))

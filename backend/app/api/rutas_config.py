@@ -135,6 +135,75 @@ def coste_global() -> dict:
     return nucleo_coste.global_(AJUSTES.datos)
 
 
+# ------------------------------------------------------------ estadísticas
+
+@router.get("/estadisticas", dependencies=[_SESION])
+def estadisticas() -> dict:
+    """Tiempos reales por paso, entre todos los proyectos (de la bitácora).
+
+    La cola es por proyecto y en serie: emparejar cada «paso_lanzado» con el
+    «paso_completado» que le sigue da la duración real de cada corrida.
+    """
+    from datetime import datetime
+
+    from ..nucleo.proyecto import Proyecto, leer_jsonl
+
+    tiempos: dict[str, list[float]] = {}
+    corridas = 0
+    proyectos = 0
+    for proyecto in Proyecto.listar(AJUSTES.carpeta_proyectos):
+        eventos = leer_jsonl(proyecto.fichero_bitacora)
+        if not eventos:
+            continue
+        proyectos += 1
+        pendientes: dict[str, str] = {}
+        for evento in eventos:
+            nombre = evento.get("evento", "")
+            paso = str(evento.get("paso", ""))
+            t = str(evento.get("t", ""))
+            if nombre == "paso_lanzado" and paso:
+                pendientes[paso] = t          # la última lanzada manda
+            elif nombre == "paso_completado" and paso in pendientes:
+                try:
+                    # ahora() acaba en «Z»: fromisoformat (<3.11) no la traga
+                    inicio = datetime.fromisoformat(
+                        pendientes.pop(paso).rstrip("Z"))
+                    fin = datetime.fromisoformat(t.rstrip("Z"))
+                    segundos = (fin - inicio).total_seconds()
+                except ValueError:
+                    continue
+                if 0 < segundos < AJUSTES.tope_trabajo_s:
+                    tiempos.setdefault(paso, []).append(segundos)
+                    corridas += 1
+
+    def _resumen(valores: list[float]) -> dict:
+        ordenados = sorted(valores)
+        n = len(ordenados)
+        return {"n": n,
+                "media_s": round(sum(ordenados) / n, 1),
+                "mediana_s": round(ordenados[n // 2], 1),
+                "max_s": round(ordenados[-1], 1)}
+
+    return {"proyectos": proyectos, "corridas": corridas,
+            "por_paso": {paso: _resumen(valores)
+                         for paso, valores in sorted(tiempos.items())}}
+
+
+@router.post("/estadisticas/valoracion", status_code=201, dependencies=_MUTAR)
+def valorar_ajuste(cuerpo: dict) -> dict:
+    """Anota si el resultado de un ajuste gustó o no (aprende de lo que sale)."""
+    from ..nucleo.proyecto import ahora, anadir_jsonl
+
+    ajuste = str((cuerpo or {}).get("ajuste", "")).strip()
+    if not ajuste:
+        raise HTTPException(400, "falta el ajuste a valorar")
+    gusto = (cuerpo or {}).get("gusto") is True
+    registro_valoracion = {"t": ahora(), "ajuste": ajuste, "gusto": gusto,
+                           "nota": str((cuerpo or {}).get("nota", ""))[:500]}
+    anadir_jsonl(Path(AJUSTES.datos) / "valoraciones.jsonl", registro_valoracion)
+    return registro_valoracion
+
+
 # ------------------------------------------------------------------- voces
 
 @router.get("/voces", dependencies=[_SESION])

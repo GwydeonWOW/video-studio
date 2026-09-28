@@ -8,6 +8,8 @@ import {
   Trash2,
   Undo2,
   FolderOpen,
+  AlertTriangle,
+  Film,
 } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
@@ -16,6 +18,7 @@ import {
   ORDEN_PASOS,
   type EstiloCanal,
   type FichaProyecto,
+  type InventarioPapelera,
 } from "../lib/tipos"
 import { Boton } from "../components/ui/button"
 import { Insignia } from "../components/ui/badge"
@@ -338,6 +341,14 @@ function DialogoCrear({
   )
 }
 
+function peso_texto(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} kB`
+  return `${bytes} B`
+}
+
 function DialogoPapelera({
   abierto,
   items,
@@ -349,6 +360,8 @@ function DialogoPapelera({
   alCerrar: () => void
   alCambiar: () => void
 }) {
+  const [pendiente, setPendiente] = useState<InventarioPapelera | null>(null)
+
   const restaurar = async (carpeta: string) => {
     try {
       await api.post(`/api/proyectos/papelera/${carpeta}/restaurar`)
@@ -358,11 +371,41 @@ function DialogoPapelera({
       toast.error(String((e as Error).message ?? e))
     }
   }
-  const eliminar = async (carpeta: string) => {
-    if (!confirm("¿Eliminar el proyecto para siempre?")) return
+
+  /** Pide el inventario ANTES de borrar: que se vea qué se pierde. */
+  const pre_eliminar = async (carpeta: string) => {
+    setPendiente(null)
     try {
-      await api.borrar(`/api/proyectos/papelera/${carpeta}`)
-      toast.success("proyecto eliminado")
+      setPendiente(
+        await api.get<InventarioPapelera>(`/api/proyectos/papelera/${carpeta}`),
+      )
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  const eliminar = async () => {
+    if (!pendiente) return
+    try {
+      await api.borrar(`/api/proyectos/papelera/${pendiente.carpeta}`)
+      toast.success("proyecto eliminado para siempre")
+      setPendiente(null)
+      alCambiar()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  const vaciar = async () => {
+    if (
+      !confirm(
+        `¿Vaciar la papelera entera (${items?.length ?? 0} proyectos)? No tiene vuelta atrás.`,
+      )
+    )
+      return
+    try {
+      await api.borrar("/api/proyectos/papelera")
+      toast.success("papelera vaciada")
       alCambiar()
     } catch (e) {
       toast.error(String((e as Error).message ?? e))
@@ -378,6 +421,7 @@ function DialogoPapelera({
             Los proyectos siguen en disco hasta que los elimines.
           </DescripcionDialogo>
         </CabeceraDialogo>
+
         <div className="max-h-80 space-y-2 overflow-y-auto">
           {!items ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
@@ -388,39 +432,104 @@ function DialogoPapelera({
               la papelera está vacía
             </p>
           ) : (
-            items.map((it) => (
-              <div
-                key={it.carpeta}
-                className="flex items-center justify-between rounded-md border px-3 py-2"
-              >
-                <div>
-                  <p className="text-sm font-medium">{it.nombre}</p>
+            items.map((it) =>
+              pendiente?.carpeta === it.carpeta ? (
+                <div
+                  key={it.carpeta}
+                  className="space-y-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-3"
+                >
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <AlertTriangle className="h-4 w-4 text-destructive" />
+                    Se pierde «{pendiente.nombre}» para siempre
+                  </div>
                   <p className="text-xs text-muted-foreground">
-                    {it.apartado || it.id}
+                    {pendiente.ficheros} ficheros ·{" "}
+                    {peso_texto(pendiente.peso)}
+                    {pendiente.videos.length > 0 &&
+                      ` · ${pendiente.videos.length} vídeo(s)`}
                   </p>
+                  <div className="max-h-32 space-y-1 overflow-y-auto text-xs">
+                    {Object.entries(pendiente.por_carpeta).map(
+                      ([grupo, info]) => (
+                        <p key={grupo} className="text-muted-foreground">
+                          <span className="font-medium text-foreground">
+                            {grupo === "." ? "raíz" : grupo}
+                          </span>
+                          : {info.nombres.slice(0, 6).join(", ")}
+                          {info.nombres.length > 6 &&
+                            ` y ${info.nombres.length - 6} más`}
+                        </p>
+                      ),
+                    )}
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Boton
+                      variante="contorno"
+                      tamano="pequeno"
+                      onClick={() => setPendiente(null)}
+                    >
+                      Cancelar
+                    </Boton>
+                    <Boton
+                      variante="destructivo"
+                      tamano="pequeno"
+                      onClick={eliminar}
+                    >
+                      <Trash2 /> Eliminar para siempre
+                    </Boton>
+                  </div>
                 </div>
-                <div className="flex gap-1">
-                  <Boton
-                    variante="fantasma"
-                    tamano="icono"
-                    title="Restaurar"
-                    onClick={() => restaurar(it.carpeta)}
-                  >
-                    <Undo2 />
-                  </Boton>
-                  <Boton
-                    variante="fantasma"
-                    tamano="icono"
-                    title="Eliminar para siempre"
-                    onClick={() => eliminar(it.carpeta)}
-                  >
-                    <Trash2 />
-                  </Boton>
+              ) : (
+                <div
+                  key={it.carpeta}
+                  className="flex items-center justify-between rounded-md border px-3 py-2"
+                >
+                  <div>
+                    <p className="text-sm font-medium">{it.nombre}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {it.apartado || it.id}
+                    </p>
+                  </div>
+                  <div className="flex gap-1">
+                    <Boton
+                      variante="fantasma"
+                      tamano="icono"
+                      title="Restaurar"
+                      onClick={() => restaurar(it.carpeta)}
+                    >
+                      <Undo2 />
+                    </Boton>
+                    <Boton
+                      variante="fantasma"
+                      tamano="icono"
+                      title="Eliminar para siempre"
+                      onClick={() => pre_eliminar(it.carpeta)}
+                    >
+                      <Trash2 />
+                    </Boton>
+                  </div>
                 </div>
-              </div>
-            ))
+              ),
+            )
           )}
         </div>
+
+        {items && items.length > 0 && (
+          <div className="flex items-center justify-between pt-2">
+            <p className="flex items-center gap-1 text-xs text-muted-foreground">
+              <Film className="h-3 w-3" />
+              {items.length} proyecto(s) ocupando disco
+            </p>
+            <Boton
+              variante="destructivo"
+              tamano="pequeno"
+              onClick={vaciar}
+              deshabilitado={!!pendiente}
+            >
+              <Trash2 /> Vaciar papelera
+            </Boton>
+          </div>
+        )}
       </ContenidoDialogo>
     </Dialogo>
   )

@@ -10,21 +10,24 @@ Reglas heredadas del original (su CLAUDE.md):
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from .. import seguridad
 from ..config import AJUSTES
+from ..nucleo import estilo
+from ..nucleo import coste as nucleo_coste
 from ..nucleo.coste import de_proyecto
 from ..nucleo.estado import GRAFO, Estado, descendientes_de
-from ..nucleo import estilo
-from ..nucleo.proyecto import (Proyecto, ahora, id_valido, leer_jsonl,
-                               lock_de)
+from ..nucleo.proyecto import (Proyecto, ahora, id_valido, leer_json,
+                               leer_jsonl, lock_de)
 from ..pasos import p3_guion, p4_voz, p6_assets, registro
-from .rutas_trabajos import GESTOR
+from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
 
@@ -115,6 +118,7 @@ def _ficha_proyecto(proyecto: Proyecto) -> dict:
             "creado": datos.get("creado"), "actualizado": datos.get("actualizado"),
             "pasos": estado.resumen(),
             "coste": de_proyecto(proyecto.raiz).get("coste", 0.0),
+            "presupuesto": datos.get("presupuesto"),
             "activo": GESTOR.activo_de(proyecto.id)}
 
 
@@ -196,6 +200,50 @@ def borrar_definitivo(carpeta: str):
     if not origen.is_dir():
         raise HTTPException(404, "no está en la papelera")
     shutil.rmtree(origen)
+
+
+@router.delete("/papelera", status_code=204, dependencies=_MUTAR)
+def vaciar_papelera():
+    """Vacia la papelera entera. Tampoco tiene vuelta atras."""
+    papelera = AJUSTES.datos / "papelera"
+    if not papelera.is_dir():
+        return
+    for carpeta in list(papelera.iterdir()):
+        if carpeta.is_dir():
+            shutil.rmtree(carpeta)
+
+
+@router.get("/papelera/{carpeta}", dependencies=[_SESION])
+def dentro_de_papelera(carpeta: str) -> dict:
+    """Qué hay dentro de un proyecto apartado, para poder decir qué se pierde."""
+    origen = AJUSTES.datos / "papelera" / carpeta
+    if not origen.is_dir():
+        raise HTTPException(404, "no está en la papelera")
+    ficha = leer_json(origen / "proyecto.json", {}) or {}
+    peso = 0
+    ficheros = 0
+    por_carpeta: dict[str, dict] = {}
+    videos: list[dict] = []
+    for ruta in origen.rglob("*"):
+        if not ruta.is_file():
+            continue
+        ficheros += 1
+        tam = ruta.stat().st_size
+        peso += tam
+        relativa = ruta.relative_to(origen)
+        grupo = (relativa.parts[0] if len(relativa.parts) > 1 else ".")
+        g = por_carpeta.setdefault(grupo, {"ficheros": 0, "peso": 0,
+                                           "nombres": []})
+        g["ficheros"] += 1
+        g["peso"] += tam
+        if len(g["nombres"]) < 100:
+            g["nombres"].append(relativa.name)
+        if ruta.suffix.lower() == ".mp4":
+            videos.append({"nombre": str(relativa), "peso": tam})
+    return {"carpeta": carpeta, "id": ficha.get("id", carpeta),
+            "nombre": ficha.get("nombre", carpeta),
+            "ficheros": ficheros, "peso": peso,
+            "por_carpeta": por_carpeta, "videos": videos}
 
 
 @router.post("/{pid}/duplicar", status_code=201, dependencies=_MUTAR)
@@ -552,7 +600,94 @@ def regenerar_plano(pid: str, escena: str) -> dict:
 @router.get("/{pid}/coste", dependencies=[_SESION])
 def coste(pid: str) -> dict:
     proyecto = _proyecto_o_404(pid)
-    return de_proyecto(proyecto.raiz)
+    ficha = de_proyecto(proyecto.raiz)
+    ficha["presupuesto"] = proyecto.leer().get("presupuesto")
+    ficha["aviso"] = ficha["presupuesto"] is not None and \
+        ficha["coste"] >= float(ficha["presupuesto"])
+    return ficha
+
+
+@router.get("/{pid}/coste/por-paso", dependencies=[_SESION])
+def coste_por_paso(pid: str) -> dict:
+    """Qué paso se ha llevado el dinero (contexto «paso[:unidad]»)."""
+    proyecto = _proyecto_o_404(pid)
+    return nucleo_coste.por_paso(nucleo_coste.eventos_de(proyecto.raiz))
+
+
+@router.get("/{pid}/coste/eventos", dependencies=[_SESION])
+def coste_eventos(pid: str, proveedor: str | None = None,
+                  paso: str | None = None, unidad: str | None = None,
+                  limite: int = 200) -> list[dict]:
+    """Detalle de cada consumo, filtrable (pantalla del coste)."""
+    proyecto = _proyecto_o_404(pid)
+    salida = []
+    for entrada in nucleo_coste.eventos_de(proyecto.raiz):
+        ctx_paso, _, ctx_unidad = str(
+            entrada.get("contexto", "")).partition(":")
+        if proveedor and entrada.get("proveedor") != proveedor:
+            continue
+        if paso and ctx_paso != paso:
+            continue
+        if unidad and ctx_unidad != unidad:
+            continue
+        salida.append({**entrada, "paso": ctx_paso or None,
+                       "unidad": ctx_unidad or None})
+    return salida[-max(1, min(limite, 1000)):]
+
+
+@router.put("/{pid}/coste/presupuesto", dependencies=_MUTAR)
+def poner_presupuesto(pid: str, cuerpo: dict) -> dict:
+    """Fija (o quita con null) el tope de gasto del proyecto."""
+    proyecto = _proyecto_o_404(pid)
+    bruto = (cuerpo or {}).get("presupuesto", None)
+    if bruto is None:
+        valor = None
+    else:
+        try:
+            valor = round(float(bruto), 2)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "el presupuesto debe ser un número "
+                                     "(o null para quitarlo)") from None
+        if valor < 0 or valor > 10000:
+            raise HTTPException(400, "el presupuesto debe estar entre 0 y "
+                                     "10000 dólares")
+    with lock_de(pid):
+        datos = proyecto.leer()
+        if valor is None:
+            datos.pop("presupuesto", None)
+        else:
+            datos["presupuesto"] = valor
+        proyecto.escribir(datos)
+    proyecto.bitacora("presupuesto_cambiado", {"presupuesto": valor})
+    return coste(pid)
+
+
+@router.get("/{pid}/coste/flujo", dependencies=[_SESION])
+async def coste_flujo(pid: str) -> StreamingResponse:
+    """SSE: coste acumulado en vivo, para que la cabecera se mueva."""
+    proyecto = _proyecto_o_404(pid)
+
+    async def flujo():
+        import asyncio
+        ultimo: tuple | None = None
+        for _ in range(1800):  # tope: 30 min por conexión
+            ficha = de_proyecto(proyecto.raiz)
+            presupuesto = proyecto.leer().get("presupuesto")
+            actual = (ficha["coste"], presupuesto)
+            if actual != ultimo:
+                yield _sse("coste", {
+                    "coste": ficha["coste"],
+                    "operaciones": ficha["operaciones"],
+                    "presupuesto": presupuesto,
+                    "aviso": presupuesto is not None
+                    and ficha["coste"] >= float(presupuesto)})
+                ultimo = actual
+            else:
+                yield ": latido\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(flujo(), media_type="text/event-stream",
+                             headers=CABECERAS_SSE)
 
 
 @router.get("/{pid}/bitacora", dependencies=[_SESION])
@@ -560,3 +695,18 @@ def bitacora(pid: str, limite: int = 200) -> list[dict]:
     proyecto = _proyecto_o_404(pid)
     entradas = leer_jsonl(proyecto.fichero_bitacora)
     return entradas[-max(1, min(limite, 1000)):]
+
+
+@router.get("/{pid}/bitacora/llm", dependencies=[_SESION])
+def bitacora_llm(pid: str, limite: int = 200) -> dict:
+    """La bitácora como texto navegable (para copiar o pelear con un LLM)."""
+    proyecto = _proyecto_o_404(pid)
+    entradas = leer_jsonl(proyecto.fichero_bitacora)
+    entradas = entradas[-max(1, min(limite, 1000)):]
+    lineas = [f"# Bitácora de {proyecto.id}", ""]
+    for entrada in entradas:
+        detalle = {k: v for k, v in entrada.items() if k not in ("t", "evento")}
+        extra = (" — " + json.dumps(detalle, ensure_ascii=False)) if detalle else ""
+        lineas.append(f"- {entrada.get('t', '')} · {entrada.get('evento', '?')}"
+                      f"{extra}")
+    return {"texto": "\n".join(lineas), "eventos": len(entradas)}

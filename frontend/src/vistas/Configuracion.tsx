@@ -8,8 +8,10 @@ import type {
   CatalogoProveedores,
   ClaveEstado,
   CosteTotal,
+  Estadisticas,
   Voz,
 } from "../lib/tipos"
+import { NOMBRES_PASOS, ORDEN_PASOS } from "../lib/tipos"
 import { Boton } from "../components/ui/button"
 import { Insignia } from "../components/ui/badge"
 import { Entrada } from "../components/ui/input"
@@ -63,6 +65,9 @@ export default function Configuracion() {
           <DisparadorPestanas valor="voces">Voces</DisparadorPestanas>
           <DisparadorPestanas valor="tarifas">Tarifas</DisparadorPestanas>
           <DisparadorPestanas valor="coste">Coste</DisparadorPestanas>
+          <DisparadorPestanas valor="estadisticas">
+            Estadísticas
+          </DisparadorPestanas>
         </ListaPestanas>
 
         <ContenidoPestanas valor="claves" className="mt-4">
@@ -79,6 +84,9 @@ export default function Configuracion() {
         </ContenidoPestanas>
         <ContenidoPestanas valor="coste" className="mt-4">
           <PestanaCoste />
+        </ContenidoPestanas>
+        <ContenidoPestanas valor="estadisticas" className="mt-4">
+          <PestanaEstadisticas />
         </ContenidoPestanas>
       </Pestanas>
     </div>
@@ -578,6 +586,87 @@ function PestanaCoste() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ---------------------------------------------------------- estadísticas */
+
+function segundos_texto(s: number): string {
+  if (s < 90) return `${s.toFixed(1)} s`
+  if (s < 5400) return `${(s / 60).toFixed(1)} min`
+  return `${(s / 3600).toFixed(1)} h`
+}
+
+function PestanaEstadisticas() {
+  const [stats, setStats] = useState<Estadisticas | null>(null)
+
+  useEffect(() => {
+    api
+      .get<Estadisticas>("/api/estadisticas")
+      .then(setStats)
+      .catch(() => setStats(null))
+  }, [])
+
+  if (!stats)
+    return (
+      <div className="flex justify-center py-16 text-muted-foreground">
+        <Loader2 className="h-6 w-6 animate-spin" />
+      </div>
+    )
+
+  const filas = [
+    ...ORDEN_PASOS.filter((p) => stats.por_paso[p]),
+    ...Object.keys(stats.por_paso).filter(
+      (p) => !(ORDEN_PASOS as readonly string[]).includes(p),
+    ),
+  ]
+  const max_media = Math.max(
+    1,
+    ...filas.map((p) => stats.por_paso[p].media_s),
+  )
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">
+        Tiempos reales por paso, medidos de la bitácora entre todos los
+        proyectos ({stats.corridas} corridas en {stats.proyectos}{" "}
+        proyecto(s)).
+      </p>
+      {filas.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          Aún no hay corridas terminadas: lanza un paso para empezar a medir.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {filas.map((paso) => {
+            const info = stats.por_paso[paso]
+            return (
+              <div key={paso} className="space-y-1">
+                <div className="flex items-center justify-between text-sm">
+                  <span>{NOMBRES_PASOS[paso] ?? paso}</span>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {info.n} corridas · mediana {segundos_texto(info.mediana_s)}{" "}
+                    · máx {segundos_texto(info.max_s)}
+                  </span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary/70"
+                    style={{
+                      width: `${(info.media_s / max_media) * 100}%`,
+                    }}
+                    title={`media ${segundos_texto(info.media_s)}`}
+                  />
+                </div>
+              </div>
+            )
+          })}
+          <p className="pt-1 text-xs text-muted-foreground">
+            La barra marca la media de duración de cada paso.
+          </p>
         </div>
       )}
     </div>

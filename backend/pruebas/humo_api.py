@@ -254,6 +254,60 @@ eventos = cliente.get(f"/api/proyectos/{pid}/bitacora").json()
 check("bitácora registra el ciclo", any(e["evento"] == "paso_completado"
                                         for e in eventos), str(eventos)[:200])
 
+r = cliente.get(f"/api/proyectos/{pid}/bitacora/llm").json()
+check("bitácora como texto navegable",
+      "paso_completado" in r["texto"] and r["eventos"] > 5, str(r)[:120])
+
+# ------------------------------------------- coste ampliado (fase A)
+r = cliente.put(f"/api/proyectos/{pid}/coste/presupuesto",
+                json={"presupuesto": 5})
+check("fijar presupuesto", r.status_code == 200
+      and r.json()["presupuesto"] == 5.0 and r.json()["aviso"] is False,
+      r.text)
+r = cliente.put(f"/api/proyectos/{pid}/coste/presupuesto",
+                json={"presupuesto": -3})
+check("presupuesto negativo -> 400", r.status_code == 400)
+r = cliente.put(f"/api/proyectos/{pid}/coste/presupuesto",
+                json={"presupuesto": None})
+check("quitar presupuesto", r.status_code == 200
+      and r.json()["presupuesto"] is None, r.text)
+
+r = cliente.get(f"/api/proyectos/{pid}/coste/por-paso").json()
+check("coste por-paso es un reparto", isinstance(r, dict))
+r = cliente.get(f"/api/proyectos/{pid}/coste/eventos").json()
+check("eventos de coste (vacíos sin pasos de pago)", isinstance(r, list))
+
+# flujo SSE: leer un trozo y cerrar
+with cliente.stream("GET", f"/api/proyectos/{pid}/coste/flujo") as flujo_sse:
+    trozo = next(flujo_sse.iter_raw())
+    check("flujo SSE de coste emite", b"event: coste" in trozo, trozo[:80])
+
+# ------------------------------------------------- papelera completa
+r = cliente.delete("/api/proyectos/papelera")
+check("vaciar papelera (aún vacía) -> 204", r.status_code == 204)
+
+cliente.delete(f"/api/proyectos/{pid2}")
+r = cliente.get("/api/proyectos/papelera").json()
+check("apartado aparece en la papelera", len(r) == 1, str(r))
+carpeta = r[0]["carpeta"] if r else ""
+
+r = cliente.get(f"/api/proyectos/papelera/{carpeta}").json()
+check("inventario de lo que se pierde",
+      r.get("ficheros", 0) > 0 and "proyecto.json" in str(
+          r.get("por_carpeta", {})), str(r)[:200])
+
+r = cliente.delete("/api/proyectos/papelera")
+check("vaciar papelera con contenido", r.status_code == 204
+      and cliente.get("/api/proyectos/papelera").json() == [])
+
+# ------------------------------------------------------- estadísticas
+r = cliente.get("/api/estadisticas").json()
+check("estadísticas leen la bitácora", r["corridas"] >= 2
+      and "ingesta" in r["por_paso"], str(r)[:200])
+r = cliente.post("/api/estadisticas/valoracion",
+                 json={"ajuste": "guion.escenas=8", "gusto": True})
+check("valoración de ajuste", r.status_code == 201, r.text)
+
 print()
 if fallos:
     print(f"{len(fallos)} FALLOS: {', '.join(fallos)}")
