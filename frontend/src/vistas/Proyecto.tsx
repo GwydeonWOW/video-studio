@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
-import { ArrowLeft, BookOpen, ClipboardCopy, Loader2, Palette, Play, Settings2, Wallet } from "lucide-react"
+import { ArrowLeft, BookOpen, ClipboardCopy, Loader2, MessageSquareHeart, Palette, Play, Settings2, Wallet } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
 import {
@@ -16,12 +16,14 @@ import {
   type FichaPasos,
   type FichaProyecto,
   type IdPaso,
+  type RespuestaFeedback,
   type TrabajoFicha,
 } from "../lib/tipos"
 import { Boton } from "../components/ui/button"
 import { Insignia } from "../components/ui/badge"
 import { Entrada } from "../components/ui/input"
 import { Etiqueta } from "../components/ui/etiqueta"
+import { AreaTexto } from "../components/ui/textarea"
 import {
   Dialogo,
   ContenidoDialogo,
@@ -431,6 +433,18 @@ export default function Proyecto() {
             }}
             recargar={() => recargar_todo(paso)}
           />
+
+          <CajaFeedback
+            pid={pid}
+            paso={paso}
+            ficha={ficha}
+            ocupado={ocupado}
+            alSeguir={(nuevo_tid) => {
+              setTid(nuevo_tid)
+              setEstadoTrabajo("en_cola")
+            }}
+            alAnotar={() => recargar_todo(paso)}
+          />
         </div>
       </div>
 
@@ -449,6 +463,145 @@ export default function Proyecto() {
         alCerrar={() => setCosteAbierto(false)}
         alCambiar={cargar_coste}
       />
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------- feedback */
+
+/** Unidades con nombre propio de los datos de un paso (guion/voz/assets). */
+function unidades_de(ficha: FichaPaso): string[] {
+  const datos = ficha.datos as Record<string, unknown> | null
+  if (!datos || typeof datos !== "object") return []
+  const planos = datos.planos
+  if (Array.isArray(planos))
+    return planos.map((p) => String((p as Record<string, unknown>).escena ?? ""))
+  const escenas = datos.escenas
+  if (Array.isArray(escenas))
+    return escenas.map((e) => String((e as Record<string, unknown>).id ?? ""))
+  return []
+}
+
+function CajaFeedback({
+  pid,
+  paso,
+  ficha,
+  ocupado,
+  alSeguir,
+  alAnotar,
+}: {
+  pid: string
+  paso: IdPaso
+  ficha: FichaPaso
+  ocupado: boolean
+  alSeguir: (tid: string) => void
+  alAnotar: () => void
+}) {
+  const [texto, setTexto] = useState("")
+  const [unidad, setUnidad] = useState("")
+  const [solo_anotar, setSoloAnotar] = useState(false)
+  const [enviando, setEnviando] = useState(false)
+  const [abierto, setAbierto] = useState(false)
+  const unidades = ficha.estado === "vacio" ? [] : unidades_de(ficha)
+
+  const enviar = async () => {
+    if (!texto.trim()) return
+    setEnviando(true)
+    try {
+      const r = await api.post<RespuestaFeedback>(
+        `/api/proyectos/${pid}/feedback`,
+        {
+          paso,
+          texto,
+          unidad: unidad || null,
+          ejecutar: solo_anotar ? false : undefined,
+        }
+      )
+      setTexto("")
+      if (r.trabajo) {
+        toast.success(`feedback en marcha (${r.nota.id})`)
+        alSeguir(r.trabajo.id)
+      } else {
+        toast.success(
+          `nota ${r.nota.id} guardada en los params: el paso queda obsoleto`,
+        )
+        alAnotar()
+      }
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setEnviando(false)
+    }
+  }
+
+  return (
+    <div className="rounded-md border bg-card">
+      <button
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium"
+        onClick={() => setAbierto((v) => !v)}
+      >
+        <MessageSquareHeart className="h-4 w-4" />
+        Feedback
+        <span className="ml-auto text-xs font-normal text-muted-foreground">
+          {abierto ? "ocultar" : "cuéntale al paso qué cambiar"}
+        </span>
+      </button>
+      {abierto && (
+        <div className="space-y-2 border-t px-3 py-3">
+          <p className="text-xs text-muted-foreground">
+            La nota se guarda en los parámetros del paso (su firma cambia:
+            quedará obsoleto) y se rehace solo lo que apunta — la unidad si
+            eliges una, el paso entero si no.
+          </p>
+          <AreaTexto
+            filas={3}
+            valor={texto}
+            alCambiar={(e) => setTexto(e.target.value)}
+            placeholder={
+              unidad
+                ? `qué cambiar en ${unidad}…`
+                : "más corto, sin exageraciones, tono más seco…"
+            }
+          />
+          {unidades.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <Etiqueta htmlFor="fb-unidad">Unidad</Etiqueta>
+              <select
+                id="fb-unidad"
+                value={unidad}
+                onChange={(e) => setUnidad(e.target.value)}
+                className="rounded-md border bg-background px-2 py-1"
+              >
+                <option value="">el paso entero</option>
+                {unidades.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={solo_anotar}
+                onChange={(e) => setSoloAnotar(e.target.checked)}
+              />
+              solo anotar (no relanzar ahora)
+            </label>
+            <Boton
+              tamano="pequeno"
+              className="ml-auto"
+              deshabilitado={enviando || !texto.trim() || ocupado}
+              onClick={enviar}
+            >
+              {enviando && <Loader2 className="animate-spin" />}
+              Enviar feedback
+            </Boton>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

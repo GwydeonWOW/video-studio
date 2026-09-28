@@ -595,6 +595,255 @@ def regenerar_plano(pid: str, escena: str) -> dict:
     return GESTOR.estado(trabajo.id)
 
 
+@router.post("/{pid}/escenas/{escena}/vale", dependencies=_MUTAR)
+def aceptar_unidad(pid: str, escena: str) -> dict:
+    """«Este dibujo me vale para lo que dice ahora». -> {ok}
+
+    Es el descarte de la tarjeta de obsoleto, y no toca la imagen ni el
+    plan: apunta la unidad como mirada y aceptada. Si la frase vuelve a
+    cambiar aguas arriba, la tarjeta vuelve — que es justo lo que se
+    quiere.
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    if estado.estado_de("assets") == "vacio":
+        raise HTTPException(409, "todavía no hay imágenes de este vídeo")
+    datos = estado.datos_de("assets") or {}
+    ids = {str(p.get("escena")) for p in datos.get("planos", [])
+           if isinstance(p, dict)}
+    if escena not in ids:
+        raise HTTPException(404, f"no hay ningún plano {escena} en este vídeo")
+    if not estado.aceptar_unidad("assets", escena):
+        raise HTTPException(409, f"el plano {escena} no está marcado "
+                                 "como obsoleto")
+    proyecto.bitacora("plano_aceptado", {"unidad": escena, "paso": "assets"})
+    return {"ok": True, "id": escena,
+            "quedan": estado.unidades_obsoletas("assets")}
+
+
+# ------------------------------------------------------------- feedback
+#
+# Feedback general o sobre una unidad. La nota se guarda en los params del
+# paso ( cambia la firma: la etiqueta significa algo) y se rehace SOLO lo
+# que apunta: la unidad si va dirigida, lo sucio si es del paso entero.
+
+#: pasos que saben rehacer UNA unidad suelta
+_CORRECCIONES_UNIDAD = {"guion", "voz", "assets"}
+
+
+def _unidades_del_paso(estado: Estado, paso: str) -> set[str]:
+    datos = estado.datos_de(paso) or {}
+    for campo, clave in _CAMPOS_UNIDADES.items():
+        if isinstance(datos.get(campo), list):
+            return {str(u.get(clave, "")) for u in datos[campo]
+                    if isinstance(u, dict)}
+    return set()
+
+
+def _corregir_unidad(proyecto: Proyecto, paso: str, unidad: str,
+                     orden: str, params: dict):
+    """Cierre de corrección por unidad, dispatchado por paso."""
+    estado = Estado(proyecto)
+
+    def funcion(trabajo):
+        trabajo.avance(f"aplicando feedback a {paso}/{unidad}")
+        if paso == "guion":
+            ficha = p3_guion.reescribir_escena(proyecto, unidad, orden, trabajo)
+        elif paso == "voz":
+            ficha = p4_voz.regrabar_escena(proyecto, unidad, params)
+        else:
+            ficha = p6_assets.regenerar_plano(proyecto, unidad, params)
+        datos = estado.datos_de(paso) or {}
+        for campo, clave in _CAMPOS_UNIDADES.items():
+            if isinstance(datos.get(campo), list):
+                datos[campo] = [ficha if (isinstance(u, dict)
+                                          and str(u.get(clave, "")) == unidad)
+                                else u for u in datos[campo]]
+        version = estado.completar(paso, params, datos,
+                                   unidades=_contar_unidades(datos))
+        for consumidor in _CONSUMIDORES.get(paso, []):
+            estado.marcar_obsoleto(consumidor, [unidad])
+        proyecto.bitacora("unidad_corregida",
+                          {"paso": paso, "unidad": unidad,
+                           "version": version, "motivo": "feedback"})
+        return {"paso": paso, "unidad": unidad, "version": version,
+                "ficha": ficha}
+
+    return funcion
+
+
+@router.post("/{pid}/feedback", status_code=202, dependencies=_MUTAR)
+def enviar_feedback(pid: str, cuerpo: dict) -> dict:
+    """Feedback general o sobre una unidad; rehace SOLO lo que apunta.
+
+    La nota se guarda en los params del paso (su firma cambia: la
+    etiqueta significa algo). Con unidad se rehace ESA unidad y nada más;
+    sin unidad el feedback es del paso entero y se relanza tal cual.
+    """
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    paso = _paso_o_404(str(cuerpo.get("paso", "")))
+    texto = str(cuerpo.get("texto", "")).strip()
+    if not texto:
+        raise HTTPException(400, "falta el texto del feedback")
+    unidad = str(cuerpo.get("unidad") or "").strip() or None
+    estado = Estado(proyecto)
+    if unidad and unidad not in _unidades_del_paso(estado, paso):
+        raise HTTPException(404, f"no hay ninguna unidad {unidad} en {paso}")
+    # la nota viaja a los params: general al cajón del paso, dirigida al
+    # de la unidad (mismo cajón que la corrección a mano)
+    if unidad:
+        previo = ((estado.paso(paso).get("params") or {})
+                  .get("unidades", {}).get(unidad, {}))
+        historial = list(previo.get("feedback") or [])
+    else:
+        historial = list((estado.paso(paso).get("params") or {})
+                         .get("feedback") or [])
+    nota = {"id": f"F{len(historial) + 1:03d}", "fecha": ahora(),
+            "texto": texto[:2000]}
+    historial.append(nota)
+    cambio_final = ({"unidades": {unidad: {"feedback": historial}}}
+                    if unidad else {"feedback": historial})
+    with lock_de(pid):
+        estado.actualizar_params(paso, cambio_final)
+        ficha = proyecto.leer()
+        ficha["actualizado"] = ahora()
+        proyecto.escribir(ficha)
+    afectadas = estado.unidades_obsoletas(paso)
+    aguas_abajo = {hijo: estado.unidades_obsoletas(hijo)
+                   for hijo in descendientes_de(paso)}
+    proyecto.bitacora("feedback", {"paso": paso, "unidad": unidad,
+                                   "texto": texto[:200], "afectadas": afectadas})
+    respuesta: dict = {"paso": paso, "unidad": unidad, "nota": nota,
+                       "afectadas": afectadas, "aguas_abajo": aguas_abajo,
+                       "estado": estado.estado_de(paso)}
+    if cuerpo.get("ejecutar") is False:
+        return respuesta
+    # relanzar: la unidad si el paso sabe rehacerla suelta, el paso si no
+    params = estado.paso(paso).get("params") or registro.params_defecto_de(paso)
+    if unidad and paso in _CORRECCIONES_UNIDAD:
+        funcion = _corregir_unidad(proyecto, paso, unidad, texto, params)
+        trabajo = GESTOR.lanzar(pid, paso, funcion, unidades=[unidad])
+    else:
+        if paso == "voz" and not estado.esta_aprobado("guion"):
+            raise HTTPException(409, "aprueba el guion (paso 3) antes de "
+                                     "rehacer la locución: así no se gastan "
+                                     "tokens de ElevenLabs en un guion en "
+                                     "revisión")
+        trabajo = GESTOR.lanzar(pid, paso,
+                                _correr(proyecto, paso, params, []),
+                                unidades=afectadas or [])
+    respuesta["trabajo"] = GESTOR.estado(trabajo.id)
+    return respuesta
+
+
+@router.post("/{pid}/guion/bloques/reescribir",
+             status_code=202, dependencies=_MUTAR)
+def reescribir_bloques(pid: str, cuerpo: dict) -> dict:
+    """Reescribe VARIAS escenas del guion con una frase. Sin tocar el audio."""
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    orden = str(cuerpo.get("orden", "")).strip()
+    ids = [str(i) for i in cuerpo.get("ids") or [] if str(i).strip()]
+    if not orden:
+        raise HTTPException(400, "falta la orden de corrección")
+    if not ids:
+        raise HTTPException(400, "falta qué escenas reescribir (ids)")
+    estado = Estado(proyecto)
+    datos = estado.datos_de("guion")
+    if not datos:
+        raise HTTPException(409, "todavía no hay guion que reescribir")
+    existentes = _unidades_del_paso(estado, "guion")
+    desconocidas = [i for i in ids if i not in existentes]
+    if desconocidas:
+        raise HTTPException(404, "escenas inexistentes: "
+                                 + ", ".join(desconocidas))
+    params = estado.paso("guion").get("params", {})
+
+    def funcion(trabajo):
+        escenas = datos.get("escenas", [])
+        for indice, eid in enumerate(ids, start=1):
+            trabajo.comprobar_cancelacion()
+            trabajo.avance(f"reescribiendo {indice}/{len(ids)}: {eid}")
+            ficha = p3_guion.reescribir_escena(proyecto, eid, orden, trabajo)
+            escenas = [ficha if (isinstance(e, dict)
+                                 and str(e.get("id", "")) == eid) else e
+                       for e in escenas]
+        datos["escenas"] = escenas
+        version = estado.completar("guion", params, datos,
+                                   unidades=_contar_unidades(datos))
+        for consumidor in _CONSUMIDORES.get("guion", []):
+            estado.marcar_obsoleto(consumidor, ids)
+        proyecto.bitacora("bloques_reescritos",
+                          {"unidades": ids, "version": version})
+        return {"paso": "guion", "unidades": ids, "version": version}
+
+    trabajo = GESTOR.lanzar(pid, "guion", funcion, unidades=ids)
+    return GESTOR.estado(trabajo.id)
+
+
+# ------------------------------------------------------------------ voz
+
+@router.post("/{pid}/voz/describir", status_code=202, dependencies=_MUTAR)
+def describir_voz(pid: str, cuerpo: dict) -> dict:
+    """Describe cómo quieres que suene y devuelve voz y mandos propuestos.
+
+    Es una PROPUESTA: no toca los params, los rellena la pantalla y
+    decide quien mira. La voz se paga cada vez que se graba.
+    """
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    encargo = str(cuerpo.get("encargo", "")).strip()
+    if not encargo:
+        raise HTTPException(400, "hace falta describir cómo quieres que "
+                                 "suene la voz")
+    idioma = str(cuerpo.get("idioma")
+                 or proyecto.leer().get("idioma", "es")).strip().lower()
+
+    def funcion(trabajo):
+        trabajo.avance("mirando el catálogo de voces")
+        propuesta = p4_voz.proponer_voz(proyecto, encargo, idioma, trabajo)
+        trabajo.avance(f"propuesta: {propuesta['voz_nombre']}")
+        proyecto.bitacora("voz_descrita",
+                          {"encargo": encargo[:200],
+                           "voz": propuesta["voz_nombre"],
+                           "velocidad": propuesta["velocidad"]})
+        return propuesta
+
+    trabajo = GESTOR.lanzar(pid, "voz", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+@router.post("/{pid}/voz/previsualizar", status_code=202, dependencies=_MUTAR)
+def previsualizar_voz(pid: str, cuerpo: dict) -> dict:
+    """Sintetiza unos segundos con estos mandos de voz para escucharlos."""
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    params = cuerpo.get("params") if isinstance(cuerpo.get("params"), dict) \
+        else {k: v for k, v in cuerpo.items() if k != "segundos"}
+    if not params:
+        params = Estado(proyecto).paso("voz").get("params") \
+            or p4_voz.params_defecto()
+    try:
+        segundos = float(cuerpo.get("segundos") or 20)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "'segundos' debe ser un número") from None
+    if not 1 <= segundos <= 120:
+        raise HTTPException(400, "'segundos' debe estar entre 1 y 120")
+
+    def funcion(trabajo):
+        trabajo.avance(f"sintetizando {round(segundos)} s de cata")
+        resultado = p4_voz.previsualizar(proyecto, params, segundos)
+        trabajo.avance("cata lista: dale al play")
+        proyecto.bitacora("voz_previsualizada",
+                          {"segundos": segundos,
+                           "voz": str(params.get("voz", ""))})
+        return resultado
+
+    trabajo = GESTOR.lanzar(pid, "voz", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
 # ------------------------------------------------------- coste y bitácora
 
 @router.get("/{pid}/coste", dependencies=[_SESION])

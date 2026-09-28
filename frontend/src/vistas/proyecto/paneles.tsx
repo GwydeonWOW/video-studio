@@ -1,9 +1,10 @@
 /** Paneles de contenido para cada paso del pipeline. */
 import { useState } from "react"
 import { toast } from "sonner"
-import { AudioLines, BadgeCheck, Loader2, PenLine, RefreshCw } from "lucide-react"
+import { AudioLines, BadgeCheck, Check, Loader2, PenLine, Play, RefreshCw } from "lucide-react"
 import { api } from "../../lib/api"
 import { segundos } from "../../lib/utils"
+import { usarTrabajo } from "../../lib/trabajos"
 import type {
   DatosAssets,
   DatosBrief,
@@ -14,6 +15,9 @@ import type {
   DatosRevision,
   DatosVoz,
   FichaPaso,
+  PrevisualizacionVoz,
+  PropuestaVoz,
+  TrabajoFicha,
 } from "../../lib/tipos"
 import { Boton } from "../../components/ui/button"
 import { AreaTexto } from "../../components/ui/textarea"
@@ -160,6 +164,11 @@ export function PanelGuion({
   seguirTrabajo,
   recargar,
 }: PropsPanel) {
+  const [seleccion, setSeleccion] = useState<Set<string>>(new Set())
+  const [bloques_abierto, setBloquesAbierto] = useState(false)
+  const [orden_bloques, setOrdenBloques] = useState("")
+  const [enviando_bloques, setEnviandoBloques] = useState(false)
+
   if (ficha.estado === "vacio")
     return (
       <Vacio
@@ -168,6 +177,36 @@ export function PanelGuion({
       />
     )
   const datos = ficha.datos as DatosGuion
+  const escenas = datos.escenas ?? []
+
+  const cambiar_seleccion = (id: string) => {
+    setSeleccion((previa) => {
+      const nueva = new Set(previa)
+      if (nueva.has(id)) nueva.delete(id)
+      else nueva.add(id)
+      return nueva
+    })
+  }
+
+  const reescribir_bloques = async () => {
+    if (!orden_bloques.trim() || seleccion.size === 0) return
+    setEnviandoBloques(true)
+    try {
+      const trabajo = await api.post<{ id: string }>(
+        `/api/proyectos/${pid}/guion/bloques/reescribir`,
+        { ids: [...seleccion], orden: orden_bloques }
+      )
+      setBloquesAbierto(false)
+      setOrdenBloques("")
+      setSeleccion(new Set())
+      seguirTrabajo(trabajo.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setEnviandoBloques(false)
+    }
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
@@ -191,19 +230,49 @@ export function PanelGuion({
           </>
         )}
       </div>
-      <p className="text-sm text-muted-foreground">
-        {datos.escenas?.length ?? 0} escenas ·{" "}
-        {segundos(datos.duracion_estimada ?? 0)} estimados
-      </p>
-      {(datos.escenas ?? []).map((escena) => (
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-muted-foreground">
+          {escenas.length} escenas ·{" "}
+          {segundos(datos.duracion_estimada ?? 0)} estimados
+        </p>
+        {seleccion.size > 0 && (
+          <Boton
+            variante="secundario"
+            tamano="pequeno"
+            deshabilitado={ocupado}
+            onClick={() => setBloquesAbierto(true)}
+          >
+            <PenLine /> Reescribir {seleccion.size} juntas
+          </Boton>
+        )}
+        {seleccion.size > 1 && (
+          <Boton
+            variante="fantasma"
+            tamano="pequeno"
+            onClick={() => setSeleccion(new Set())}
+          >
+            limpiar selección
+          </Boton>
+        )}
+      </div>
+      {escenas.map((escena) => (
         <Tarjeta key={escena.id}>
           <ContenidoTarjeta className="space-y-2 p-4">
             <div className="flex items-start justify-between gap-2">
-              <div>
-                <p className="font-mono text-xs text-muted-foreground">
-                  {escena.id}
-                </p>
-                <p className="font-medium">{escena.titulo}</p>
+              <div className="flex min-w-0 items-start gap-2">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 shrink-0 accent-primary"
+                  checked={seleccion.has(escena.id)}
+                  onChange={() => cambiar_seleccion(escena.id)}
+                  title="Marcar para reescribir en bloque"
+                />
+                <div className="min-w-0">
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {escena.id}
+                  </p>
+                  <p className="font-medium">{escena.titulo}</p>
+                </div>
               </div>
               <BotonReescribir
                 pid={pid}
@@ -234,6 +303,40 @@ export function PanelGuion({
           </ContenidoTarjeta>
         </Tarjeta>
       ))}
+
+      <Dialogo abierto={bloques_abierto} alCambiar={setBloquesAbierto}>
+        <ContenidoDialogo>
+          <CabeceraDialogo>
+            <TituloDialogo>
+              Reescribir {seleccion.size} escenas juntas
+            </TituloDialogo>
+            <DescripcionDialogo>
+              Una orden para todas las marcadas ([...{[...seleccion].join(", ")}
+              ...]). El LLM reescribe cada una por separado respetando la
+              orden; el audio no se toca (quedará obsoleto por escena).
+            </DescripcionDialogo>
+          </CabeceraDialogo>
+          <AreaTexto
+            filas={4}
+            valor={orden_bloques}
+            alCambiar={(e) => setOrdenBloques(e.target.value)}
+            placeholder="cíñete a los datos, sin exageraciones, frases más cortas…"
+            autoFocus
+          />
+          <div className="flex justify-end gap-2">
+            <Boton variante="contorno" onClick={() => setBloquesAbierto(false)}>
+              Cancelar
+            </Boton>
+            <Boton
+              onClick={reescribir_bloques}
+              deshabilitado={enviando_bloques || !orden_bloques.trim()}
+            >
+              {enviando_bloques && <Loader2 className="animate-spin" />}
+              Reescribir
+            </Boton>
+          </div>
+        </ContenidoDialogo>
+      </Dialogo>
     </div>
   )
 }
@@ -377,7 +480,13 @@ function BotonReescribir({
 
 /* ----------------------------------------------------------------- 4 voz */
 
-export function PanelVoz({ pid, ficha, ocupado, seguirTrabajo }: PropsPanel) {
+export function PanelVoz({
+  pid,
+  ficha,
+  ocupado,
+  seguirTrabajo,
+  recargar,
+}: PropsPanel) {
   if (ficha.estado === "vacio")
     return (
       <Vacio
@@ -388,6 +497,12 @@ export function PanelVoz({ pid, ficha, ocupado, seguirTrabajo }: PropsPanel) {
   const datos = ficha.datos as DatosVoz
   return (
     <div className="space-y-3">
+      <ZonaElegirVoz
+        pid={pid}
+        ocupado={ocupado}
+        params={ficha.params ?? {}}
+        recargar={recargar}
+      />
       <p className="text-sm text-muted-foreground">
         {datos.duracion ? segundos(datos.duracion) : "—"} de locución
       </p>
@@ -426,6 +541,218 @@ export function PanelVoz({ pid, ficha, ocupado, seguirTrabajo }: PropsPanel) {
           </Boton>
         </div>
       ))}
+    </div>
+  )
+}
+
+/** Elegir voz describiéndola + cata antes de pagar la grabación entera. */
+function ZonaElegirVoz({
+  pid,
+  ocupado,
+  params,
+  recargar,
+}: {
+  pid: string
+  ocupado: boolean
+  params: Record<string, unknown>
+  recargar: () => void
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const [encargo, setEncargo] = useState("")
+  const [tid, setTid] = useState<string | null>(null)
+  const [propuesta, setPropuesta] = useState<PropuestaVoz | null>(null)
+  const [cata, setCata] = useState<PrevisualizacionVoz | null>(null)
+  const [pid_cata, setPidCata] = useState<string | null>(null)
+  const [cata_corriendo, setCataCorriendo] = useState(false)
+
+  const al_terminar = (final: TrabajoFicha) => {
+    if (final.estado === "hecho" && final.paso === "voz") {
+      const r = final.resultado
+      if (r && typeof r === "object" && "voz_nombre" in r) {
+        setPropuesta(r as PropuestaVoz)
+        toast.success(`propuesta: ${(r as PropuestaVoz).voz_nombre}`)
+      } else if (r && typeof r === "object" && "url" in r) {
+        setCata(r as PrevisualizacionVoz)
+        setCataCorriendo(false)
+      }
+    } else if (final.estado === "fallo") {
+      toast.error(final.error || "el trabajo falló")
+      setCataCorriendo(false)
+    }
+  }
+  const { ficha: trabajo } = usarTrabajo({ tid, alTerminar: al_terminar })
+  const trabajando =
+    !!tid && (trabajo?.estado === "en_cola" || trabajo?.estado === "ejecutando")
+
+  const proponer = async () => {
+    if (!encargo.trim()) return
+    setPropuesta(null)
+    setCata(null)
+    try {
+      const trabajo = await api.post<{ id: string }>(
+        `/api/proyectos/${pid}/voz/describir`,
+        { encargo }
+      )
+      setTid(trabajo.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  const mandos_de = (p: PropuestaVoz) => ({
+    voz: p.voz,
+    modelo: p.modelo,
+    estabilidad: p.estabilidad,
+    similitud: p.similitud,
+    velocidad: p.velocidad,
+  })
+
+  const previsualizar = async (mandos: Record<string, unknown>) => {
+    setCataCorriendo(true)
+    setCata(null)
+    try {
+      const trabajo = await api.post<{ id: string }>(
+        `/api/proyectos/${pid}/voz/previsualizar`,
+        { params: mandos, segundos: 15 }
+      )
+      setPidCata(trabajo.id)
+      setTid(trabajo.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+      setCataCorriendo(false)
+    }
+  }
+
+  const aplicar = async () => {
+    if (!propuesta) return
+    try {
+      await api.put(`/api/proyectos/${pid}/pasos/voz/params`, {
+        ...params,
+        ...mandos_de(propuesta),
+      })
+      toast.success(
+        `parámetros de voz rellenados (${propuesta.voz_nombre}): el paso queda obsoleto`,
+      )
+      setPropuesta(null)
+      setAbierto(false)
+      recargar()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  return (
+    <div className="rounded-md border bg-card px-3 py-2">
+      <button
+        className="flex w-full items-center gap-2 text-left text-sm font-medium"
+        onClick={() => setAbierto((v) => !v)}
+      >
+        <AudioLines className="h-4 w-4" />
+        Elegir voz describiéndola
+        <span className="ml-auto text-xs font-normal text-muted-foreground">
+          {abierto ? "ocultar" : "cata antes de pagar la grabación"}
+        </span>
+      </button>
+      {abierto && (
+        <div className="mt-3 space-y-3">
+          <AreaTexto
+            filas={3}
+            valor={encargo}
+            alCambiar={(e) => setEncargo(e.target.value)}
+            placeholder="una voz cálida y cercana, hombre joven, ritmo tranquilo, estilo documental…"
+          />
+          <div className="flex flex-wrap gap-2">
+            <Boton
+              tamano="pequeno"
+              deshabilitado={ocupado || trabajando || !encargo.trim()}
+              onClick={proponer}
+            >
+              {trabajando ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <AudioLines />
+              )}
+              Proponer voz
+            </Boton>
+            <Boton
+              variante="contorno"
+              tamano="pequeno"
+              deshabilitado={ocupado || cata_corriendo}
+              title="Sintetiza ~15 s con los parámetros guardados (cuesta esos caracteres)"
+              onClick={() => previsualizar(params)}
+            >
+              {cata_corriendo ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Play />
+              )}
+              Cata con los parámetros actuales
+            </Boton>
+          </div>
+
+          {propuesta && (
+            <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
+              <p className="font-medium">
+                {propuesta.voz_nombre}{" "}
+                <span className="font-mono text-xs text-muted-foreground">
+                  ({propuesta.voz})
+                </span>
+              </p>
+              {Object.keys(propuesta.voz_etiquetas ?? {}).length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {Object.entries(propuesta.voz_etiquetas ?? {})
+                    .filter(([, v]) => v)
+                    .map(([k, v]) => `${k}: ${String(v)}`)
+                    .join(" · ")}
+                </p>
+              )}
+              {propuesta.motivo && (
+                <p className="text-xs italic text-muted-foreground">
+                  «{propuesta.motivo}»
+                </p>
+              )}
+              <p className="font-mono text-xs text-muted-foreground">
+                modelo {propuesta.modelo} · estabilidad{" "}
+                {propuesta.estabilidad} · similitud {propuesta.similitud} ·
+                velocidad {propuesta.velocidad}
+              </p>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Boton tamano="pequeno" onClick={aplicar}>
+                  Usar esta voz
+                </Boton>
+                <Boton
+                  variante="contorno"
+                  tamano="pequeno"
+                  deshabilitado={cata_corriendo}
+                  onClick={() => previsualizar(mandos_de(propuesta))}
+                >
+                  {pid_cata && cata_corriendo ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Play />
+                  )}
+                  Escuchar cata
+                </Boton>
+              </div>
+            </div>
+          )}
+
+          {cata && (
+            <div className="space-y-1 rounded-md border p-3">
+              <p className="text-xs text-muted-foreground">
+                cata de {cata.segundos} s · {cata.caracteres} caracteres ·
+                suena con las primeras frases del guion
+              </p>
+              <audio
+                controls
+                preload="none"
+                src={cata.url}
+                className="h-8 w-full"
+              />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -481,6 +808,7 @@ export function PanelAssets({
   ocupado,
   seguirTrabajo,
   alEjecutar,
+  recargar,
 }: PropsPanel) {
   if (ficha.estado === "vacio")
     return (
@@ -533,24 +861,51 @@ export function PanelAssets({
                 <span className="font-mono text-xs text-muted-foreground">
                   {plano.escena}
                 </span>
-                <Boton
-                  variante="fantasma"
-                  tamano="pequeno"
-                  deshabilitado={ocupado}
-                  title="Regenerar (cuesta una imagen)"
-                  onClick={async () => {
-                    try {
-                      const trabajo = await api.post<{ id: string }>(
-                        `/api/proyectos/${pid}/assets/planos/${plano.escena}/regenerar`
-                      )
-                      seguirTrabajo(trabajo.id)
-                    } catch (e) {
-                      toast.error(String((e as Error).message ?? e))
-                    }
-                  }}
-                >
-                  <RefreshCw /> Regenerar
-                </Boton>
+                <div className="flex items-center gap-1">
+                  {obsoleto && (
+                    <Boton
+                      variante="fantasma"
+                      tamano="pequeno"
+                      deshabilitado={ocupado}
+                      title="Este dibujo me vale para lo que dice ahora: retira la tarjeta (vuelve si cambia el texto)"
+                      onClick={async () => {
+                        try {
+                          const r = await api.post<{ quedan: number }>(
+                            `/api/proyectos/${pid}/escenas/${plano.escena}/vale`
+                          )
+                          toast.success(
+                            r.quedan > 0
+                              ? `quedan ${r.quedan} por revisar`
+                              : "todas las imágenes revisadas",
+                          )
+                          recargar()
+                        } catch (e) {
+                          toast.error(String((e as Error).message ?? e))
+                        }
+                      }}
+                    >
+                      <Check /> Me vale
+                    </Boton>
+                  )}
+                  <Boton
+                    variante="fantasma"
+                    tamano="pequeno"
+                    deshabilitado={ocupado}
+                    title="Regenerar (cuesta una imagen)"
+                    onClick={async () => {
+                      try {
+                        const trabajo = await api.post<{ id: string }>(
+                          `/api/proyectos/${pid}/assets/planos/${plano.escena}/regenerar`
+                        )
+                        seguirTrabajo(trabajo.id)
+                      } catch (e) {
+                        toast.error(String((e as Error).message ?? e))
+                      }
+                    }}
+                  >
+                    <RefreshCw /> Regenerar
+                  </Boton>
+                </div>
               </div>
             </div>
           )
