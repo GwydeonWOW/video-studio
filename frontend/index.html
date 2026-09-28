@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Estudio de Vídeo</title>
+    <script>
+      // Tema antes del primer pintado: sin esto se ve un destello claro.
+      ;(function () {
+        var t = localStorage.getItem("tema")
+        var oscuro = t
+          ? t === "oscuro"
+          : window.matchMedia("(prefers-color-scheme: dark)").matches
+        if (oscuro) document.documentElement.classList.add("dark")
+      })()
+    </script>
   </head>
   <body>
     <div id="raiz"></div>

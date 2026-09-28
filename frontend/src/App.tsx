@@ -8,6 +8,7 @@ import Login from "./vistas/Login"
 import Galeria from "./vistas/Galeria"
 import Proyecto from "./vistas/Proyecto"
 import Configuracion from "./vistas/Configuracion"
+import { ConmutadorTema } from "./components/conmutador_tema"
 
 function Cabecera() {
   const { estado } = useAuth()
@@ -31,6 +32,7 @@ function Cabecera() {
           >
             Configuración
           </Link>
+          <ConmutadorTema />
           {estado?.autenticado && estado.usuario && (
             <span className="ml-2 hidden rounded-md bg-secondary px-2.5 py-1 text-xs text-muted-foreground sm:inline">
               {estado.usuario}

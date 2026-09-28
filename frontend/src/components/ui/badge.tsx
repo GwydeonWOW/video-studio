@@ -12,8 +12,8 @@ const variantesInsignia = cva(
         secundario: "border-transparent bg-secondary text-secondary-foreground",
         destructivo:
           "border-transparent bg-destructive text-destructive-foreground",
-        exito: "border-transparent bg-emerald-100 text-emerald-800",
-        aviso: "border-transparent bg-amber-100 text-amber-800",
+        exito: "border-transparent bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300",
+        aviso: "border-transparent bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
         contorno: "text-foreground",
       },
     },
