@@ -87,6 +87,42 @@ r = cliente.post("/api/proyectos", json={"nombre": "x"})
 check("segundo proyecto no pisa el id", r.status_code == 201
       and r.json()["id"] != pid)
 
+# --------------------------------------------------------------------- estilo
+r = cliente.get("/api/estilo").json()
+check("estilo inicial sin definir", r["definido"] is False
+      and r["ritmo_min"] == 20 and r["ritmo_max"] == 40)
+
+r = cliente.post(f"/api/proyectos/{pid}/aplicar-estilo")
+check("aplicar estilo sin definir -> 400", r.status_code == 400, r.text)
+
+r = cliente.put("/api/estilo", json={
+    "nombre": "Canal Ciencia", "idioma": "es",
+    "tono": "divulgativo y cálido", "estilo_grafico": "acuarela suave",
+    "ritmo_min": 999, "ritmo_max": 30, "velocidad": 1.05,
+})
+check("guardar estilo (con recorte de límites)", r.status_code == 200
+      and r.json()["definido"] is True and r.json()["ritmo_min"] == 120
+      and r.json()["ritmo_max"] >= r.json()["ritmo_min"], r.text)
+
+r = cliente.post(f"/api/proyectos/{pid}/aplicar-estilo")
+check("aplicar estilo al proyecto", r.status_code == 200
+      and "brief" in r.json()["pasos"] and "assets" in r.json()["pasos"],
+      r.text)
+pasos = cliente.get(f"/api/proyectos/{pid}/pasos").json()
+check("params del brief siembran el estilo",
+      pasos["pasos"]["brief"]["params"].get("tono") == "divulgativo y cálido"
+      and pasos["pasos"]["voz"]["params"].get("velocidad") == 1.05)
+r = cliente.post(f"/api/proyectos/{pid}/aplicar-estilo")
+check("reaplicar sin cambios no toca nada", r.json()["pasos"] == [], r.text)
+
+r = cliente.post("/api/proyectos", json={"nombre": "Hereda estilo"})
+pid2 = r.json()["id"]
+pasos2 = cliente.get(f"/api/proyectos/{pid2}/pasos").json()
+check("proyecto nuevo hereda el estilo",
+      pasos2["pasos"]["brief"]["params"].get("tono") == "divulgativo y cálido"
+      and pasos2["pasos"]["assets"]["params"].get("estilo") == "acuarela suave")
+
+
 # --------------------------------------------------------------------- params
 r = cliente.put(f"/api/proyectos/{pid}/pasos/ingesta/params",
                 json={"texto": TEXTO, "titulo": "El transistor"})

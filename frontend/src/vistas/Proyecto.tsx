@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
-import { ArrowLeft, BookOpen, Loader2, Play, Settings2 } from "lucide-react"
+import { ArrowLeft, BookOpen, Loader2, Palette, Play, Settings2 } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
 import {
@@ -190,6 +190,30 @@ export default function Proyecto() {
     }
   }
 
+  const aplicar_estilo = async () => {
+    if (
+      !confirm(
+        "¿Reaplicar el estilo del canal? Los pasos afectados quedarán obsoletos: regenerarlos gasta dinero."
+      )
+    )
+      return
+    try {
+      const r = await api.post<{
+        pasos: string[]
+        obsoletos_al_regenerar: string[]
+      }>(`/api/proyectos/${pid}/aplicar-estilo`)
+      if (r.pasos.length === 0) {
+        toast("el proyecto ya tenía el estilo del canal")
+      } else {
+        const nombres = r.pasos.map((p) => NOMBRES_PASOS[p] ?? p).join(", ")
+        toast.success(`estilo aplicado a: ${nombres}`)
+      }
+      recargar_todo()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
   /* ------------------------------------------------------------ render */
 
   if (!proyecto || !pasos || !ficha) {
@@ -230,6 +254,14 @@ export default function Proyecto() {
           </p>
         </div>
         <div className="ml-auto flex gap-2">
+          <Boton
+            variante="contorno"
+            tamano="pequeno"
+            title="Copiar el estilo del canal sobre los params de este proyecto"
+            onClick={aplicar_estilo}
+          >
+            <Palette /> Aplicar estilo
+          </Boton>
           <Boton
             variante="contorno"
             tamano="pequeno"

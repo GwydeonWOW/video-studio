@@ -86,9 +86,48 @@ interface DescriptorCampo {
 }
 
 const CAMPOS: Record<string, DescriptorCampo[]> = {
-  brief: [],
+  brief: [
+    {
+      clave: "tono",
+      etiqueta: "Tono del guion",
+      tipo: "texto",
+      ayuda: "Viene del estilo del canal si se definió.",
+    },
+    {
+      clave: "idioma",
+      etiqueta: "Idioma de la narración",
+      tipo: "selector",
+      opciones: ["es", "en"],
+    },
+    {
+      clave: "ritmo_min",
+      etiqueta: "Segundos por escena (mín)",
+      tipo: "numero",
+      min: 5,
+      max: 120,
+    },
+    {
+      clave: "ritmo_max",
+      etiqueta: "Segundos por escena (máx)",
+      tipo: "numero",
+      min: 5,
+      max: 180,
+    },
+  ],
   guion: [
     { clave: "escenas", etiqueta: "Escenas", tipo: "numero", min: 1, max: 30 },
+    {
+      clave: "tono",
+      etiqueta: "Tono",
+      tipo: "texto",
+      ayuda: "Viene del estilo del canal si se definió.",
+    },
+    {
+      clave: "idioma",
+      etiqueta: "Idioma de la narración",
+      tipo: "selector",
+      opciones: ["es", "en"],
+    },
   ],
   voz: [
     { clave: "voz", etiqueta: "Voz (id ElevenLabs)", tipo: "texto" },

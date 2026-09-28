@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { Link, useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 import {
   Copy,
@@ -14,6 +14,7 @@ import { dolares } from "../lib/utils"
 import {
   NOMBRES_PASOS,
   ORDEN_PASOS,
+  type EstiloCanal,
   type FichaProyecto,
 } from "../lib/tipos"
 import { Boton } from "../components/ui/button"
@@ -242,6 +243,15 @@ function DialogoCrear({
   const [canal, setCanal] = useState("")
   const [idioma, setIdioma] = useState("es")
   const [enviando, setEnviando] = useState(false)
+  const [estilo, setEstilo] = useState<EstiloCanal | null>(null)
+
+  useEffect(() => {
+    if (abierto)
+      api
+        .get<EstiloCanal>("/api/estilo")
+        .then(setEstilo)
+        .catch(() => setEstilo(null))
+  }, [abierto])
 
   const crear = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -266,9 +276,20 @@ function DialogoCrear({
         <CabeceraDialogo>
           <TituloDialogo>Nuevo proyecto</TituloDialogo>
           <DescripcionDialogo>
-            Los pasos arrancan con sus parámetros por defecto.
+            {estilo?.definido
+              ? `Arranca sembrado con el estilo del canal${estilo.nombre ? ` «${estilo.nombre}»` : ""}: tono, ritmo, voz y estilo gráfico.`
+              : "Los pasos arrancan con sus parámetros por defecto."}
           </DescripcionDialogo>
         </CabeceraDialogo>
+        {estilo && !estilo.definido && (
+          <p className="-mt-1 text-sm text-amber-600 dark:text-amber-400">
+            Todavía no hay estilo del canal:{" "}
+            <Link to="/estilo" className="underline underline-offset-2">
+              defínelo primero
+            </Link>{" "}
+            para que todos los vídeos sigan la misma línea.
+          </p>
+        )}
         <form onSubmit={crear} className="space-y-4">
           <div className="space-y-2">
             <Etiqueta htmlFor="nombre">Nombre</Etiqueta>

@@ -7,6 +7,7 @@ import type { EstadoAuth } from "./lib/tipos"
 import Login from "./vistas/Login"
 import Galeria from "./vistas/Galeria"
 import Proyecto from "./vistas/Proyecto"
+import Estilo from "./vistas/Estilo"
 import Configuracion from "./vistas/Configuracion"
 import { ConmutadorTema } from "./components/conmutador_tema"
 
@@ -20,6 +21,12 @@ function Cabecera() {
           Estudio de Vídeo
         </Link>
         <nav className="ml-auto flex items-center gap-1 text-sm">
+          <Link
+            to="/estilo"
+            className="rounded-md px-3 py-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+          >
+            Estilo
+          </Link>
           <Link
             to="/"
             className="rounded-md px-3 py-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
@@ -85,6 +92,7 @@ export default function App() {
             <Routes>
               <Route path="/" element={<Galeria />} />
               <Route path="/p/:pid" element={<Proyecto />} />
+              <Route path="/estilo" element={<Estilo />} />
               <Route path="/config" element={<Configuracion />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

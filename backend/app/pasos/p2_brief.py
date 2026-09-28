@@ -26,6 +26,33 @@ def params_defecto() -> dict:
     return {}
 
 
+def linea_canal(params: dict) -> str:
+    """La línea editorial del canal, tal como se la cuenta al modelo.
+
+    Viene de los params sembrados con el estilo del canal (o vacía si el
+    proyecto no la tiene: los proyectos viejos siguen igual)."""
+    partes = []
+    tono = str(params.get("tono", "") or "").strip()
+    if tono:
+        partes.append(f"- Tono: {tono}.")
+    idioma = str(params.get("idioma", "") or "").strip().lower()
+    if idioma == "en":
+        partes.append('- Idioma de la narración: inglés ("angulo", "publico" '
+                      'y "tono" del JSON también en inglés).')
+    try:
+        ritmo_min = int(params.get("ritmo_min") or 0)
+        ritmo_max = int(params.get("ritmo_max") or 0)
+    except (TypeError, ValueError):
+        ritmo_min = ritmo_max = 0
+    if ritmo_min > 0 and ritmo_max >= ritmo_min:
+        partes.append(f"- Cadencia del canal: entre {ritmo_min} y {ritmo_max} "
+                      "segundos por escena (respétalo en \"formato\").")
+    if not partes:
+        return ""
+    return "LINEA DEL CANAL (todos los vídeos del canal la siguen):\n" + \
+        "\n".join(partes)
+
+
 def estimar(params: dict) -> dict:
     return {"llamadas_llm": 1, "imagenes": 0, "caracteres_voz": 0,
             "coste": None}   # None -> la API lo rellena con el proveedor activo
@@ -39,13 +66,20 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     trabajo.avance("leyendo el material y escribiendo el brief")
     llamada = llm.rol_config("guion", comun.ajustes_llm())
     llamada.sistema = SISTEMA
-    llamada.instruccion = f"MATERIAL:\n\n{texto[:60000]}"
+    linea = linea_canal(params)
+    llamada.instruccion = (f"{linea}\n\nMATERIAL:\n\n{texto[:60000]}"
+                           if linea else f"MATERIAL:\n\n{texto[:60000]}")
     llamada.contexto = "brief"
     llamada.proyecto = proyecto.id
     respuesta = llm.llamar_json(llamada, claves=comun.claves_actuales())
     if not isinstance(respuesta, dict) or not respuesta.get("puntos"):
         raise llm.ErrorLLM("el brief no trae puntos: respuesta invalida")
-    respuesta.setdefault("formato", {"min": 20, "max": 40})
+    try:
+        ritmo_min = int(params.get("ritmo_min") or 20)
+        ritmo_max = int(params.get("ritmo_max") or 40)
+    except (TypeError, ValueError):
+        ritmo_min, ritmo_max = 20, 40
+    respuesta.setdefault("formato", {"min": ritmo_min, "max": ritmo_max})
     trabajo.avance(f"brief listo: {len(respuesta['puntos'])} puntos, "
                    f"tono {respuesta.get('tono', '?')}")
     return respuesta

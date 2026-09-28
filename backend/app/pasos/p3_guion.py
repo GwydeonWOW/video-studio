@@ -49,10 +49,16 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     trabajo.avance("escribiendo el guion")
     llamadas = llm.rol_config("guion", comun.ajustes_llm())
     llamadas.sistema = SISTEMA
-    llamadas.instruccion = (
-        f"BRIEF:\n{a_json(brief)}\n\nMATERIAL (respaldo):\n"
-        f"{ingesta.get('texto', '')[:40000]}\n\n"
-        f"Numero de escenas apuntado: {int(params.get('escenas', 8))}.")
+    linea = p2_brief.linea_canal(params)
+    # el brief ya trae el formato del canal en "formato"; la línea se la
+    # recuerda al guionista para que la narración respete la cadencia
+    partes = [f"BRIEF:\n{a_json(brief)}"]
+    if linea:
+        partes.append(linea)
+    partes.append(f"MATERIAL (respaldo):\n{ingesta.get('texto', '')[:40000]}")
+    partes.append(f"Numero de escenas apuntado: "
+                  f"{int(params.get('escenas', 8))}.")
+    llamadas.instruccion = "\n\n".join(partes)
     llamadas.contexto = "guion"
     llamadas.proyecto = proyecto.id
     llamadas.max_tokens = 12000

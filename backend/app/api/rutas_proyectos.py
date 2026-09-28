@@ -20,6 +20,7 @@ from .. import seguridad
 from ..config import AJUSTES
 from ..nucleo.coste import de_proyecto
 from ..nucleo.estado import GRAFO, Estado, descendientes_de
+from ..nucleo import estilo
 from ..nucleo.proyecto import (Proyecto, ahora, id_valido, leer_jsonl,
                                lock_de)
 from ..pasos import p3_guion, p4_voz, p6_assets, registro
@@ -139,8 +140,15 @@ def crear(cuerpo: dict) -> dict:
     # la calidad de imagen entra en la firma y cambiarla despues dejaria
     # obsoleto solo lo de abajo (regla del original)
     estado = Estado(proyecto)
+    params_por_paso = {paso: registro.params_defecto_de(paso)
+                       for paso in GRAFO}
+    # el estilo del canal (si ya está definido) se siembra aquí también:
+    # COPIA de valores sobre los defectos, nunca una referencia
+    estilo_canal = estilo.leer(AJUSTES.datos)
+    if estilo_canal["definido"]:
+        estilo.aplicar_a_params(params_por_paso, estilo_canal)
     for paso in GRAFO:
-        estado.guardar_params(paso, registro.params_defecto_de(paso))
+        estado.guardar_params(paso, params_por_paso[paso])
     proyecto.bitacora("proyecto_creado", {"nombre": nombre})
     return _ficha_proyecto(proyecto)
 
@@ -205,6 +213,46 @@ def duplicar(pid: str) -> dict:
     copia.escribir(datos)
     copia.bitacora("proyecto_duplicado", {"de": pid})
     return _ficha_proyecto(copia)
+
+
+@router.post("/{pid}/aplicar-estilo", dependencies=_MUTAR)
+def aplicar_estilo(pid: str) -> dict:
+    """Reaplica el estilo del canal a los params de un proyecto existente.
+
+    Copia los VALORES sobre los params guardados (regla del original: sin
+    referencias, para que cambiar el estilo no rompa vídeos terminados).
+    Los pasos tocados quedan obsoletos a la vista; quien decide
+    regenerar —y pagar— sigue siendo la persona.
+    """
+    proyecto = _proyecto_o_404(pid)
+    if GESTOR.activo_de(pid):
+        raise HTTPException(409, "hay un trabajo en marcha en ese proyecto")
+    estilo_canal = estilo.leer(AJUSTES.datos)
+    if not estilo_canal["definido"]:
+        raise HTTPException(400, "define primero el estilo del canal "
+                                 "(pestaña Estilo)")
+    estado = Estado(proyecto)
+    tocados: list[str] = []
+    with lock_de(pid):
+        params_por_paso = {paso: dict(estado.paso(paso).get("params") or {})
+                           for paso in estilo.PASOS_ESTILADOS}
+        estilo.aplicar_a_params(params_por_paso, estilo_canal)
+        for paso, params in params_por_paso.items():
+            if params != (estado.paso(paso).get("params") or {}):
+                estado.guardar_params(paso, params)
+                tocados.append(paso)
+        ficha = proyecto.leer()
+        ficha["actualizado"] = ahora()
+        proyecto.escribir(ficha)
+    proyecto.bitacora("estilo_aplicado", {"pasos": tocados})
+    # la cascada que VERIA la persona al regenerar: pasos tocados con
+    # material e hijos con material (igual que guardar_params)
+    afectados = set(tocados)
+    for paso in tocados:
+        afectados.update(descendientes_de(paso))
+    obsoletos = sorted(p for p in afectados if estado.estado_de(p) != "vacio")
+    return {"pasos": tocados, "obsoletos_al_regenerar": obsoletos,
+            "estilo": estilo_canal}
 
 
 # ------------------------------------------------------------------ elemento

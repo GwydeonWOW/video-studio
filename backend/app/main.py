@@ -16,8 +16,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import seguridad
-from .api import (archivos, rutas_auth, rutas_config, rutas_proyectos,
-                  rutas_trabajos)
+from .api import (archivos, rutas_auth, rutas_config, rutas_estilo,
+                  rutas_proyectos, rutas_trabajos)
 from .config import AJUSTES, preparar_carpetas
 
 
@@ -27,6 +27,7 @@ def crear_app() -> FastAPI:
                          docs_url=None, redoc_url=None, openapi_url=None)
 
     aplicacion.include_router(rutas_auth.router)
+    aplicacion.include_router(rutas_estilo.router)
     aplicacion.include_router(rutas_config.router)
     aplicacion.include_router(rutas_trabajos.router)
     aplicacion.include_router(rutas_proyectos.router)

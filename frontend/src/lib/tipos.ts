@@ -205,6 +205,20 @@ export interface CatalogoProveedores {
   roles_defecto: Record<string, { proveedor: string; modelo: string }>
 }
 
+/** Estilo del canal (GET/PUT /api/estilo): lo que se decide UNA vez. */
+export interface EstiloCanal {
+  definido: boolean
+  nombre: string
+  idioma: "es" | "en"
+  estilo_grafico: string
+  tono: string
+  ritmo_min: number
+  ritmo_max: number
+  voz: string
+  velocidad: number
+  actualizado: string
+}
+
 export interface Escena {
   id: string
   titulo?: string

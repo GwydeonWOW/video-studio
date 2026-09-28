@@ -37,24 +37,24 @@ PROVEEDORES = {
         "nombre": "GLM (z.ai)",
         "esquema": "openai",
         "base": "https://api.z.ai/api/paas/v4",
-        "modelos": ["glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4.5-flash"],
-        "defecto": "glm-4.6",
+        "modelos": ["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-4.6"],
+        "defecto": "glm-5.3",
         "variable": "ESTUDIO_GL_KEY",
     },
     "openai": {
         "nombre": "OpenAI GPT",
         "esquema": "openai",
         "base": "https://api.openai.com/v1",
-        "modelos": ["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini"],
-        "defecto": "gpt-5-mini",
+        "modelos": ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5-mini"],
+        "defecto": "gpt-6-sol",
         "variable": "ESTUDIO_OPENAI_KEY",
     },
     "anthropic": {
         "nombre": "Claude (Anthropic)",
         "esquema": "anthropic",
         "base": "https://api.anthropic.com/v1",
-        "modelos": ["claude-sonnet-4-5", "claude-haiku-4-5"],
-        "defecto": "claude-sonnet-4-5",
+        "modelos": ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5"],
+        "defecto": "claude-sonnet-5",
         "variable": "ESTUDIO_ANTHROPIC_KEY",
     },
 }
@@ -62,10 +62,10 @@ PROVEEDORES = {
 #: Papeles del producto y a que proveedor/modelo van por defecto. Se
 #: sobreescribe desde la configuracion (api/ajustes) sin tocar esto.
 ROLES_DEFECTO = {
-    "guion": {"proveedor": "glm", "modelo": "glm-4.6"},
-    "correccion": {"proveedor": "glm", "modelo": "glm-4.6"},
-    "titulos": {"proveedor": "glm", "modelo": "glm-4.5-flash"},
-    "descripcion": {"proveedor": "glm", "modelo": "glm-4.5-flash"},
+    "guion": {"proveedor": "glm", "modelo": "glm-5.3"},
+    "correccion": {"proveedor": "glm", "modelo": "glm-5.3"},
+    "titulos": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
+    "descripcion": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
 }
 
 
@@ -159,6 +159,19 @@ def llamar(llamada: Llamada, claves: dict | None = None,
                 raise ErrorLLM(
                     f"{llamada.proveedor} rechazo la llamada "
                     f"({respuesta.status_code}): {respuesta.text[:300]}")
+            if respuesta.status_code == 400 and esquema == "openai":
+                # los modelos de razonamiento nuevos rechazan parametros
+                # clasicos: se quitan y se reintenta en el acto
+                detalle = respuesta.text[:500].lower()
+                cambiado = False
+                if "temperature" in detalle and "temperature" in cuerpo:
+                    cuerpo.pop("temperature", None)
+                    cambiado = True
+                if "max_tokens" in detalle and "max_tokens" in cuerpo:
+                    cuerpo["max_completion_tokens"] = cuerpo.pop("max_tokens")
+                    cambiado = True
+                if cambiado:
+                    continue
             ultimo_error = (f"{respuesta.status_code}: {respuesta.text[:300]}")
         if intento < INTENTOS:
             time.sleep(2 ** intento)
