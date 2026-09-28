@@ -73,6 +73,7 @@ ROLES_DEFECTO = {
     "catalogo": {"proveedor": "glm", "modelo": "glm-5.3"},
     "conservacion": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
     "guia_estilo": {"proveedor": "glm", "modelo": "glm-5.3"},
+    "asistente": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
 }
 
 
@@ -308,3 +309,183 @@ def rol_config(rol: str, ajustes_llm: dict | None = None) -> Llamada:
         proveedor = "glm"
     modelo = conf.get("modelo") or PROVEEDORES[proveedor]["defecto"]
     return Llamada(proveedor=proveedor, modelo=modelo)
+
+
+# ------------------------------------------------------- conversación + tools
+
+def llamar_conversacion(llamada: Llamada, mensajes: list[dict],
+                        herramientas: list[dict] | None = None,
+                        claves: dict | None = None,
+                        ajustes_proveedor: dict | None = None) -> dict:
+    """UNA vuelta de una conversación multi-turno, con herramientas opcionales.
+
+    `mensajes` va en el formato NORMALIZADO del estudio (independiente del
+    proveedor):
+
+        [{"rol": "user",      "texto": str},
+         {"rol": "asistente", "texto": str},
+         {"rol": "asistente", "texto": str, "llamadas":
+             [{"id", "nombre", "argumentos": dict}]},
+         {"rol": "user", "resultados":
+             [{"id", "texto": str}]}]
+
+    `herramientas`: [{"nombre", "descripcion", "parametros": esquema-json}].
+
+    -> {"texto": str,                la parte hablada (puede venir vacía
+                                      si solo pidió herramientas)
+        "llamadas": [{id, nombre, argumentos}],   lo que pidió ejecutar
+        "uso": {"entrada": n, "salida": n}}
+
+    El bucle (pedir -> ejecutar -> volver a pedir) lo lleva quien llama:
+    aquí solo UNA ida y vuelta, para que el asistente pueda cancelar entre
+    vueltas.
+    """
+    clave = clave_de(llamada.proveedor, claves)
+    if not clave:
+        raise ErrorLLM(f"falta la clave del proveedor '{llamada.proveedor}' "
+                       f"({PROVEEDORES[llamada.proveedor]['variable']})")
+    esquema = _esquema_de(llamada.proveedor)
+    base = _base_de(llamada.proveedor, ajustes_proveedor)
+    url = (f"{base}/chat/completions" if esquema == "openai"
+           else f"{base}/messages")
+    cabeceras = {"Content-Type": "application/json"}
+
+    if esquema == "openai":
+        cabeceras["Authorization"] = f"Bearer {clave}"
+        cuerpo: dict = {"model": llamada.modelo,
+                        "messages": _abrir_mensajes(mensajes,
+                                                    llamada.sistema, esquema),
+                        "max_tokens": llamada.max_tokens}
+        if llamada.temperatura:
+            cuerpo["temperature"] = llamada.temperatura
+        if herramientas:
+            cuerpo["tools"] = [
+                {"type": "function",
+                 "function": {"name": h["nombre"],
+                              "description": h.get("descripcion", ""),
+                              "parameters": h.get(
+                                  "parametros",
+                                  {"type": "object", "properties": {}})}}
+                for h in herramientas]
+    else:
+        cabeceras["x-api-key"] = clave
+        cabeceras["anthropic-version"] = "2023-06-01"
+        cuerpo = {"model": llamada.modelo,
+                  "max_tokens": llamada.max_tokens,
+                  "messages": _abrir_mensajes(mensajes, "", esquema)}
+        if llamada.temperatura:
+            cuerpo["temperature"] = llamada.temperatura
+        if llamada.sistema:
+            cuerpo["system"] = llamada.sistema
+        if herramientas:
+            cuerpo["tools"] = [
+                {"name": h["nombre"],
+                 "description": h.get("descripcion", ""),
+                 "input_schema": h.get("parametros",
+                                       {"type": "object", "properties": {}})}
+                for h in herramientas]
+
+    ultimo_error = ""
+    for intento in range(1, INTENTOS + 1):
+        try:
+            respuesta = requests.post(url, headers=cabeceras,
+                                      json=cuerpo, timeout=TIEMPO_FUERA_S)
+        except requests.RequestException as fallo:
+            ultimo_error = f"red: {fallo}"
+        else:
+            if respuesta.status_code == 200:
+                crudo = respuesta.json()
+                texto, llamadas, uso = _extraer_conversacion(crudo, esquema)
+                _apuntar(llamada, uso)
+                return {"texto": texto, "llamadas": llamadas, "uso": uso}
+            if respuesta.status_code in (401, 403, 404):
+                raise ErrorLLM(
+                    f"{llamada.proveedor} rechazo la llamada "
+                    f"({respuesta.status_code}): {respuesta.text[:300]}")
+            ultimo_error = f"{respuesta.status_code}: {respuesta.text[:300]}"
+        if intento < INTENTOS:
+            time.sleep(2 ** intento)
+    raise ErrorLLM(f"{llamada.proveedor} fallo tras {INTENTOS} intentos: "
+                   f"{ultimo_error}")
+
+
+def _abrir_mensajes(mensajes: list[dict], sistema: str, esquema: str) -> list:
+    """Traduce el formato normalizado al del proveedor (sin el system)."""
+    salida = []
+    for mensaje in mensajes:
+        rol = mensaje.get("rol")
+        texto = str(mensaje.get("texto") or "")
+        llamadas = mensaje.get("llamadas") or []
+        resultados = mensaje.get("resultados") or []
+        if esquema == "openai":
+            if rol == "user" and resultados:
+                for resultado in resultados:
+                    salida.append({"role": "tool",
+                                   "tool_call_id": resultado.get("id"),
+                                   "content": resultado.get("texto", "")})
+                continue
+            m: dict = {"role": "user" if rol == "user" else "assistant",
+                       "content": texto or None}
+            if llamadas:
+                m["tool_calls"] = [
+                    {"id": h.get("id"), "type": "function",
+                     "function": {"name": h.get("nombre"),
+                                  "arguments": json.dumps(
+                                      h.get("argumentos") or {},
+                                      ensure_ascii=False)}}
+                    for h in llamadas]
+            salida.append(m)
+        else:  # anthropic
+            if rol == "user" and resultados:
+                salida.append({"role": "user", "content": [
+                    {"type": "tool_result",
+                     "tool_use_id": resultado.get("id"),
+                     "content": resultado.get("texto", "")}
+                    for resultado in resultados]})
+                continue
+            bloques = []
+            if texto:
+                bloques.append({"type": "text", "text": texto})
+            bloques.extend({"type": "tool_use", "id": h.get("id"),
+                            "name": h.get("nombre"),
+                            "input": h.get("argumentos") or {}}
+                           for h in llamadas)
+            salida.append({"role": "user" if rol == "user" else "assistant",
+                           "content": bloques or [{"type": "text",
+                                                   "text": ""}]})
+    return salida
+
+
+def _extraer_conversacion(crudo: dict, esquema: str) -> tuple[str, list, dict]:
+    """Texto + llamadas de herramienta + uso, del cuerpo del proveedor."""
+    try:
+        if esquema == "openai":
+            mensaje = crudo["choices"][0]["message"]
+            texto = str(mensaje.get("content") or "")
+            llamadas = []
+            for pedido in mensaje.get("tool_calls") or []:
+                funcion = pedido.get("function") or {}
+                argumentos: dict = {}
+                bruto = funcion.get("arguments") or "{}"
+                try:
+                    argumentos = json.loads(bruto)
+                except ValueError:
+                    argumentos = {"_bruto": bruto[:2000]}
+                llamadas.append({"id": pedido.get("id"),
+                                 "nombre": funcion.get("name"),
+                                 "argumentos": argumentos})
+            uso = crudo.get("usage", {}) or {}
+        else:
+            bloques = crudo.get("content", []) or []
+            texto = "".join(b.get("text", "") for b in bloques
+                            if b.get("type") == "text")
+            llamadas = [{"id": b.get("id"), "nombre": b.get("name"),
+                         "argumentos": b.get("input") or {}}
+                        for b in bloques if b.get("type") == "tool_use"]
+            uso = crudo.get("usage", {}) or {}
+    except (KeyError, IndexError, TypeError) as fallo:
+        raise ErrorLLM(f"respuesta inesperada del LLM: {fallo}") from fallo
+    return (texto.strip(), llamadas,
+            {"entrada": uso.get("input_tokens", uso.get("prompt_tokens", 0)),
+             "salida": uso.get("output_tokens",
+                               uso.get("completion_tokens", 0))})

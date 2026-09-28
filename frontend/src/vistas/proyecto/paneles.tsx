@@ -1,5 +1,5 @@
 /** Paneles de contenido para cada paso del pipeline. */
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { AudioLines, BadgeCheck, Check, Film, Loader2, Palette, PenLine, Play, RefreshCw } from "lucide-react"
 import { api } from "../../lib/api"
@@ -16,6 +16,7 @@ import type {
   DatosVoz,
   FichaPaso,
   PrevisualizacionVoz,
+  PresetVoz,
   PropuestaVoz,
   TrabajoFicha,
 } from "../../lib/tipos"
@@ -35,7 +36,15 @@ import {
   TituloDialogo,
   DescripcionDialogo,
 } from "../../components/ui/dialogo"
+import {
+  Selector,
+  DisparadorSelector,
+  ContenidoSelector,
+  Opcion,
+  ValorSelector,
+} from "../../components/ui/selector"
 import { Vacio } from "./piezas"
+import { ZonaPresetPaso } from "./preset_paso"
 import { DialogoGrafismo, type PestanaGrafismo } from "./grafismo"
 import {
   DialogoSonido,
@@ -128,7 +137,7 @@ export function PanelIngesta({ pid, ficha, alEjecutar, ocupado }: PropsPanel) {
 
 /* --------------------------------------------------------------- 2 brief */
 
-export function PanelBrief({ ficha }: PropsPanel) {
+export function PanelBrief({ pid, ficha, recargar }: PropsPanel) {
   if (ficha.estado === "vacio")
     return (
       <Vacio
@@ -139,6 +148,7 @@ export function PanelBrief({ ficha }: PropsPanel) {
   const datos = ficha.datos as DatosBrief
   return (
     <div className="space-y-4">
+      <ZonaPresetPaso pid={pid} tipo="guion" recargar={recargar} />
       {datos.tono && (
         <p className="text-sm text-muted-foreground">
           Tono: <span className="text-foreground">{datos.tono}</span>
@@ -514,6 +524,13 @@ export function PanelVoz({
         params={ficha.params ?? {}}
         recargar={recargar}
       />
+      <ZonaTonosCatalogo
+        pid={pid}
+        ocupado={ocupado}
+        params={ficha.params ?? {}}
+        recargar={recargar}
+      />
+      <ZonaPresetPaso pid={pid} tipo="voz" recargar={recargar} />
       <p className="text-sm text-muted-foreground">
         {datos.duracion ? segundos(datos.duracion) : "—"} de locución
       </p>
@@ -768,6 +785,114 @@ function ZonaElegirVoz({
   )
 }
 
+/** El catálogo de tonos: un desplegable que rellena los mandos. */
+function ZonaTonosCatalogo({
+  pid,
+  ocupado,
+  params,
+  recargar,
+}: {
+  pid: string
+  ocupado: boolean
+  params: Record<string, unknown>
+  recargar: () => void
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const [tonos, setTonos] = useState<PresetVoz[] | null>(null)
+  const [eleccion, setEleccion] = useState("")
+
+  useEffect(() => {
+    if (abierto && !tonos)
+      api
+        .get<PresetVoz[]>("/api/presets")
+        .then(setTonos)
+        .catch((e) => {
+          toast.error(String(e.message ?? e))
+          setTonos([])
+        })
+  }, [abierto, tonos])
+
+  const ficha = tonos?.find((t) => t.id === eleccion)
+
+  const aplicar = async () => {
+    if (!ficha) return
+    try {
+      await api.put(`/api/proyectos/${pid}/pasos/voz/params`, {
+        ...params,
+        voz: ficha.voces_sugeridas?.[0],
+        modelo: ficha.modelo,
+        estabilidad: ficha.estabilidad,
+        similitud: ficha.similitud,
+        velocidad: ficha.velocidad,
+      })
+      toast.success(
+        `tono «${ficha.nombre}» aplicado: regraba la locución para oírlo`,
+      )
+      setEleccion("")
+      setAbierto(false)
+      recargar()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  return (
+    <div className="rounded-md border bg-card px-3 py-2">
+      <button
+        className="flex w-full items-center gap-2 text-left text-sm font-medium"
+        onClick={() => setAbierto((v) => !v)}
+      >
+        <AudioLines className="h-4 w-4" />
+        Elegir un tono del catálogo
+        <span className="ml-auto text-xs font-normal text-muted-foreground">
+          {abierto ? "ocultar" : `${tonos?.length ?? 8} tonos con sus mandos`}
+        </span>
+      </button>
+      {abierto && (
+        <div className="mt-3 space-y-3">
+          <Selector valor={eleccion} alCambiar={setEleccion}>
+            <DisparadorSelector>
+              <ValorSelector placeholder="un tono de locución…" />
+            </DisparadorSelector>
+            <ContenidoSelector>
+              {(tonos ?? []).map((t) => (
+                <Opcion key={t.id} valor={t.id}>
+                  {t.nombre}
+                  <span className="text-xs text-muted-foreground">
+                    {" "}
+                    · {t.voces_nombres?.[0] ?? ""}
+                  </span>
+                </Opcion>
+              ))}
+            </ContenidoSelector>
+          </Selector>
+          {ficha && (
+            <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
+              <p className="font-medium">{ficha.nombre}</p>
+              {ficha.descripcion && (
+                <p className="text-xs italic text-muted-foreground">
+                  {ficha.descripcion}
+                </p>
+              )}
+              <p className="font-mono text-xs text-muted-foreground">
+                estabilidad {ficha.estabilidad} · similitud{" "}
+                {ficha.similitud} · velocidad {ficha.velocidad}
+              </p>
+              <Boton
+                tamano="pequeno"
+                deshabilitado={ocupado}
+                onClick={aplicar}
+              >
+                Aplicar tono
+              </Boton>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* ----------------------------------------------------- 5 revisión de voz */
 
 export function PanelRevision({ ficha }: PropsPanel) {
@@ -846,6 +971,7 @@ export function PanelAssets({
             Estilo
           </Boton>
         </div>
+        <ZonaPresetPaso pid={pid} tipo="estilo" recargar={recargar} />
         <DialogoEstiloVisual
           pid={pid}
           abierto={estilo_abierto}
@@ -863,6 +989,7 @@ export function PanelAssets({
 
   return (
     <div className="space-y-4">
+      <ZonaPresetPaso pid={pid} tipo="estilo" recargar={recargar} />
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm text-muted-foreground">
           {datos.planos?.length ?? 0} planos · calidad {datos.calidad}
@@ -1030,6 +1157,7 @@ export function PanelCallouts({ pid, ficha, recargar }: PropsPanel) {
   const datos = ficha.datos as DatosCallouts
   return (
     <div className="space-y-2">
+      <ZonaPresetPaso pid={pid} tipo="rotulos" recargar={recargar} />
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm text-muted-foreground">
           {(datos.rotulos ?? []).length} rótulo(s)

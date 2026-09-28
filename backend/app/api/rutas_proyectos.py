@@ -143,7 +143,13 @@ def _ficha_proyecto(proyecto: Proyecto) -> dict:
 
 @router.get("", dependencies=[_SESION])
 def listar() -> list[dict]:
-    return [_ficha_proyecto(p) for p in Proyecto.listar(AJUSTES.carpeta_proyectos)]
+    # los TALLERES (proyectos donde el modo light genera un preset de
+    # canal) no son trabajo de nadie: son la trastienda. Se ocultan aquí
+    # y no en Proyecto.listar porque la papelera y las estadísticas SÍ
+    # tienen que verlo todo.
+    return [_ficha_proyecto(p)
+            for p in Proyecto.listar(AJUSTES.carpeta_proyectos)
+            if not p.leer().get("taller")]
 
 
 @router.post("", status_code=201, dependencies=_MUTAR)

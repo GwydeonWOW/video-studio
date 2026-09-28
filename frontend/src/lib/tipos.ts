@@ -690,6 +690,133 @@ export interface Escena {
   palabras?: { palabra: string; inicio: number; fin: number }[]
 }
 
+/* ---------- presets: locución, canal y modo light (Fase H) ---------- */
+
+/** Un tono de locución del catálogo (GET /api/presets). */
+export interface PresetVoz {
+  id: string
+  nombre: string
+  descripcion: string
+  voces_sugeridas: string[]
+  voces_nombres: string[]
+  modelo: string
+  estabilidad: number
+  similitud: number
+  velocidad: number
+  hueco_minimo?: number
+}
+
+export type TipoPreset = "guion" | "estilo" | "rotulos" | "voz" | "canal"
+
+/** Un preset guardado, tal como lo publica la API (con resumen y viñetas). */
+export interface PresetCanal {
+  id: string
+  tipo: TipoPreset
+  tipo_nombre: string
+  nombre: string
+  nota: string
+  fecha: string
+  modificado?: string
+  miniatura?: string
+  hay_miniatura?: boolean
+  resumen: string
+  vinetas: { icono: string; texto: string }[]
+  idioma: string
+  origen_ritmo: string
+  apartado?: string
+  datos: Record<string, any>
+}
+
+/** Respuesta de GET /api/presets-canal. */
+export interface FichaPresetsCanal {
+  presets: Record<TipoPreset, PresetCanal[]>
+  papelera: PresetCanal[]
+  tipos: { id: TipoPreset; nombre: string }[]
+  total: number
+}
+
+/** Respuesta de POST /{prid}/aplicar: lo que tocó y lo que restauró. */
+export interface ResultadoAplicar {
+  preset: PresetCanal
+  cambios: Record<string, Record<string, unknown>>
+  /** Las láminas devueltas al banco de moodboards (clave + ejes). */
+  lamina_devueltas?: { clave: string; ejes: string[] }
+  /** Pasos cuyas unidades quedaron obsoletas tras el cambio de params. */
+  obsoletos?: Record<string, unknown>
+}
+
+/** Peso de un preset apartado (GET /{prid}/peso). */
+export interface PesoPreset {
+  id: string
+  nombre: string
+  ficheros: number
+  bytes: number
+  [detalle: string]: unknown
+}
+
+/** Un ritmo del modo light, con sus dos cifras y su coste. */
+export interface RitmoLight {
+  id: string
+  nombre: string
+  ritmo_min: number
+  ritmo_max: number
+  media_s: number
+  velocidad: number
+  usd_por_minuto: number
+}
+
+/** Los cuatro campos (más idioma y ritmo): TODO el formulario del modo. */
+export interface EncargoLight {
+  nombre: string
+  estilo_prompt: string
+  tono_prompt: string
+  voz_prompt: string
+  idioma: string
+  ritmo: string
+  voz_id?: string
+}
+
+/** Una tarea del plan (lo que hará el taller, en una línea). */
+export interface TareaLight {
+  id: string
+  nombre: string
+  descripcion?: string
+  tanda?: number
+  [detalle: string]: unknown
+}
+
+/** Respuesta de POST /api/presets-light/plan. */
+export interface PlanLight {
+  tandas: TareaLight[][]
+  segundos: number
+  imagenes: number
+  tareas: TareaLight[]
+}
+
+/** Respuesta de GET /api/presets-light (la pantalla entera). */
+export interface FichaPresetsLight {
+  ritmos: RitmoLight[]
+  ritmo_defecto: string
+  idiomas: { id: string; nombre: string }[]
+  plan: PlanLight
+  presets: PresetCanal[]
+  papelera: PresetCanal[]
+  hay_openai: boolean
+  hay_elevenlabs: boolean
+}
+
+/** Respuesta de GET /api/presets-light/{prid}. */
+export interface FichaPresetLight {
+  preset: PresetCanal
+  encargo: Record<string, string>
+  muestras: string[]
+  taller: string
+  activo: TrabajoFicha | null
+}
+
+/** Respuesta de POST /{prid}/escucha: doce segundos con la voz del canal. */
+export interface EscuchaLight extends PrevisualizacionVoz {}
+
 export const NOMBRES_PASOS: Record<string, string> = {
   ingesta: "Material",
   brief: "Brief",
@@ -713,6 +840,7 @@ export const NOMBRES_PASOS: Record<string, string> = {
   banda: "Banda sonora",
   efectos: "Efectos",
   transiciones: "Transiciones",
+  taller: "Taller",
 }
 
 /* ------------------------------------------ Fase G: sonido y transiciones */
@@ -845,6 +973,36 @@ export interface FichaTransiciones {
   acento: { acento: number[]; oscuro: number[]; claro: number[] }
   reparto: RepartoTransicion[]
   resumen: string
+}
+
+/** Turno de una charla con el asistente (tu pregunta o su respuesta). */
+export interface TurnoAsistente {
+  n: number
+  quien: "tu" | "asistente"
+  texto: string
+  estado?: "pensando" | "listo" | "error" | "cancelado"
+  fecha?: string
+  segundos?: number
+  tokens?: number
+}
+
+/** Respuesta de GET/POST /api/asistente/charlas/{cid}. */
+export interface CharlaAsistente {
+  id: string
+  proyecto: string
+  turnos: TurnoAsistente[]
+  ocupada: boolean
+  modelo: string
+}
+
+/** Respuesta de GET /api/asistente: si puede contestar y con qué cuenta. */
+export interface EstadoAsistente {
+  listo: boolean
+  motivo: string
+  cuenta: string
+  modelo: string
+  simulado: boolean
+  claves: { clave: string; presente: boolean }[]
 }
 
 export const ORDEN_PASOS: IdPaso[] = [

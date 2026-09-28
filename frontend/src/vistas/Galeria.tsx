@@ -14,6 +14,7 @@ import {
 } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
+import Light from "./Light"
 import {
   NOMBRES_PASOS,
   ORDEN_PASOS,
@@ -63,12 +64,24 @@ const COLOR_PUNTO: Record<string, string> = {
 
 export default function Galeria() {
   const navegar = useNavigate()
+  const [light, setLight] = useState(
+    () => window.location.hash.replace("#", "") === "light",
+  )
   const [proyectos, setProyectos] = useState<FichaProyecto[] | null>(null)
   const [papelera, setPapelera] = useState<ProyectoPapelera[] | null>(null)
   const [crear_abierto, setCrearAbierto] = useState(false)
   const [papelera_abierta, setPapeleraAbierta] = useState(false)
   const [seleccion, setSeleccion] = useState<Set<string>>(new Set())
   const [tanda_tid, setTandaTid] = useState<string | null>(null)
+
+  const ir_a = (es_light: boolean) => {
+    setLight(es_light)
+    window.history.replaceState(
+      null,
+      "",
+      es_light ? "#light" : window.location.pathname + window.location.search,
+    )
+  }
 
   const alternar_seleccion = (id: string) => {
     setSeleccion((prev) => {
@@ -163,8 +176,31 @@ export default function Galeria() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Proyectos</h1>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-4">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {light ? "Modo light" : "Proyectos"}
+          </h1>
+          <div className="flex rounded-md border p-0.5 text-sm">
+            <button
+              className={`rounded px-2.5 py-1 ${
+                light ? "text-muted-foreground" : "bg-secondary font-medium"
+              }`}
+              onClick={() => ir_a(false)}
+            >
+              a mano
+            </button>
+            <button
+              className={`rounded px-2.5 py-1 ${
+                light ? "bg-secondary font-medium" : "text-muted-foreground"
+              }`}
+              onClick={() => ir_a(true)}
+            >
+              de una tirada
+            </button>
+          </div>
+        </div>
+        {!light && (
+          <div className="flex gap-2">
           {seleccion.size > 0 && (
             <Boton
               variante="contorno"
@@ -189,9 +225,14 @@ export default function Galeria() {
           <Boton tamano="pequeno" onClick={() => setCrearAbierto(true)}>
             <Plus /> Nuevo proyecto
           </Boton>
-        </div>
+          </div>
+        )}
       </div>
 
+      {light ? (
+        <Light alCambiar={cargar} />
+      ) : (
+        <>
       {tanda_tid && (
         <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -290,6 +331,8 @@ export default function Galeria() {
             </Tarjeta>
           ))}
         </div>
+      )}
+        </>
       )}
 
       <DialogoCrear

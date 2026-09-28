@@ -25,7 +25,7 @@ _MUTAR = [Depends(seguridad.exigir_sesion), Depends(seguridad.exigir_origen)]
 
 ROLES = ("guion", "correccion", "titulos", "descripcion",
          "direccion", "redactor", "cartelas", "repaso",
-         "catalogo", "conservacion", "guia_estilo")
+         "catalogo", "conservacion", "guia_estilo", "asistente")
 ROL_INVALIDO = ("rol desconocido; roles: " + ", ".join(ROLES))
 
 

@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
 import { ArrowLeft, BookOpen, Camera, ChevronLeft, ChevronRight, ClipboardCopy, Eye, Loader2, MessageSquareHeart, Palette, Pause, Play, Settings2, Wallet, Zap } from "lucide-react"
 import { api } from "../lib/api"
+import { apuntarPantalla } from "../lib/pantalla"
 import { dolares, segundos } from "../lib/utils"
 import {
   NOMBRES_PASOS,
@@ -80,6 +81,11 @@ export default function Proyecto() {
   const [coste_abierto, setCosteAbierto] = useState(false)
   const [receta_abierta, setRecetaAbierta] = useState(false)
   const [visor_abierto, setVisorAbierto] = useState(false)
+
+  // la foto de pantalla que se lleva el asistente al preguntar
+  useEffect(() => {
+    apuntarPantalla({ pestana: paso, url: `/p/${pid}` })
+  }, [paso, pid])
 
   /* ------------------------------------------------------------ cargas */
 

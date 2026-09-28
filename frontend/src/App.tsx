@@ -10,6 +10,7 @@ import Proyecto from "./vistas/Proyecto"
 import Estilo from "./vistas/Estilo"
 import Configuracion from "./vistas/Configuracion"
 import { ConmutadorTema } from "./components/conmutador_tema"
+import { Asistente } from "./components/asistente"
 
 function Cabecera() {
   const { estado } = useAuth()
@@ -74,6 +75,9 @@ export default function App() {
   // sin ficha todavía: pantalla en blanco un instante
   if (!estado) return null
 
+  // el proyecto abierto en pantalla, para la foto del asistente
+  const pid_ruta = /^\/p\/([^/]+)/.exec(localizacion.pathname)?.[1] ?? ""
+
   // instalación pendiente o sesión ausente -> siempre al login
   const necesita_entrada = estado.instalacion || !estado.autenticado
 
@@ -97,6 +101,7 @@ export default function App() {
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>
+          <Asistente pid={pid_ruta} />
         </>
       )}
     </ContextoAuth.Provider>
