@@ -29,6 +29,8 @@ CATALOGO = [
     ("openai", "OpenAI", "ESTUDIO_OPENAI_KEY", "gpt + imagenes"),
     ("anthropic", "Anthropic", "ESTUDIO_ANTHROPIC_KEY", "claude (opcional)"),
     ("elevenlabs", "ElevenLabs", "ESTUDIO_ELEVENLABS_KEY", "voz"),
+    ("jamendo", "Jamendo", "ESTUDIO_JAMENDO_ID", "musica de fondo"),
+    ("freesound", "FreeSound", "ESTUDIO_FREESOUND_KEY", "efectos de sonido"),
 ]
 
 #: variables de entorno -> campo en claves.json
@@ -37,6 +39,8 @@ _ENTORNO_A_JSON = {
     "ESTUDIO_OPENAI_KEY": ("openai", None),
     "ESTUDIO_ANTHROPIC_KEY": ("llm", "anthropic"),
     "ESTUDIO_ELEVENLABS_KEY": ("elevenlabs", None),
+    "ESTUDIO_JAMENDO_ID": ("jamendo", None),
+    "ESTUDIO_FREESOUND_KEY": ("freesound", None),
 }
 
 
@@ -51,7 +55,7 @@ def leer_claves(carpeta: Path | str) -> dict:
     if isinstance(datos, dict):
         llm = datos.get("llm") or {}
         planas.update({k: v for k, v in llm.items() if isinstance(v, str)})
-        for campo in ("openai", "elevenlabs"):
+        for campo in ("openai", "elevenlabs", "jamendo", "freesound"):
             if isinstance(datos.get(campo), str):
                 planas[campo] = datos[campo]
     for variable, (seccion, campo) in _ENTORNO_A_JSON.items():
@@ -76,7 +80,7 @@ def guardar_claves(carpeta: Path | str, nuevas: dict[str, str]) -> None:
         if clave in ("glm", "anthropic"):
             datos.setdefault("llm", {})
             datos["llm"][clave] = valor
-        elif clave in ("openai", "elevenlabs"):
+        elif clave in ("openai", "elevenlabs", "jamendo", "freesound"):
             datos[clave] = valor
     escribir_json(destino, datos)
     try:
@@ -156,4 +160,26 @@ def probar_claves(carpeta: Path | str) -> dict:
                                         "detalle": detalle}
         except requests.RequestException as e:
             resultados["elevenlabs"] = {"ok": False, "detalle": f"red: {e}"}
+    if claves.get("jamendo"):
+        try:
+            r = requests.get("https://api.jamendo.com/v3.0/tracks/",
+                             params={"client_id": claves["jamendo"],
+                                     "format": "json", "limit": 1},
+                             timeout=30)
+            ok = (r.status_code == 200
+                  and (r.json().get("headers") or {}).get("status") == "success")
+            resultados["jamendo"] = {"ok": ok, "detalle": f"{r.status_code}"}
+        except requests.RequestException as e:
+            resultados["jamendo"] = {"ok": False, "detalle": f"red: {e}"}
+    if claves.get("freesound"):
+        try:
+            r = requests.get("https://freesound.org/apiv2/search/text/",
+                             params={"query": "whoosh", "page_size": 1},
+                             headers={"Authorization":
+                                      "Token " + claves["freesound"]},
+                             timeout=30)
+            resultados["freesound"] = {"ok": r.status_code == 200,
+                                       "detalle": f"{r.status_code}"}
+        except requests.RequestException as e:
+            resultados["freesound"] = {"ok": False, "detalle": f"red: {e}"}
     return resultados

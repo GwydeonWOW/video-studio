@@ -133,6 +133,8 @@ export interface DatosRender {
   resolucion: string
   escenas: number
   masterizado: boolean
+  sonido?: string
+  transiciones?: string
 }
 
 /* ---------- trabajos ---------- */
@@ -708,6 +710,141 @@ export const NOMBRES_PASOS: Record<string, string> = {
   guia: "Guía de estilo",
   moodboard: "Moodboard",
   conservacion: "Conservación",
+  banda: "Banda sonora",
+  efectos: "Efectos",
+  transiciones: "Transiciones",
+}
+
+/* ------------------------------------------ Fase G: sonido y transiciones */
+
+/** Un tema de Jamendo tal como llega de la búsqueda (escucha = para oírlo). */
+export interface TemaMusica {
+  fuente: string
+  id: string
+  titulo: string
+  artista: string
+  duracion: number
+  descarga: string
+  escucha: string
+  licencia: string
+  etiquetas?: string[]
+  instrumentos?: string[]
+  vocal?: string
+  velocidad?: string
+}
+
+/** Un tramo del vídeo y el ánimo que le pediría a la música. */
+export interface TramoArco {
+  i: number
+  desde: number
+  hasta: number
+  animo: string
+  velocidad?: string
+  densidad?: number
+  planos?: number
+  fraccion?: number
+  por_que?: string
+}
+
+/** Respuesta de GET /{pid}/sonido/arco. */
+export interface ArcoSonido {
+  duracion: number
+  tramos: TramoArco[]
+}
+
+/** La música puesta: un tema único o la banda por tramos. */
+export interface MusicaPuesta {
+  id?: string
+  titulo?: string
+  artista?: string
+  licencia?: string
+  duracion?: number
+  modo?: string
+  ganancia_db?: number
+  cruce_s?: number
+  tramos?: (TemaMusica & { animo?: string })[]
+}
+
+/** Un efecto surtido, con su muestra del banco para oírlo. */
+export interface EfectoSurtido {
+  fuente: string
+  id: string
+  titulo: string
+  autor: string
+  duracion: number
+  licencia: string
+  etiquetas?: string[]
+  brillo?: number
+  dureza?: number
+  reverb?: number
+  error?: string
+  papel: string
+  clave: string
+  en_banco: boolean
+  muestra: string
+  vetado: boolean
+  agudo?: number
+}
+
+/** Lo que suena y hay que firmar en los créditos. */
+export interface CreditoMusica {
+  titulo: string
+  artista: string
+  fuente: string
+  licencia: string
+}
+
+/** Respuesta de GET /{pid}/sonido. */
+export interface FichaSonido {
+  activo: boolean
+  musica: MusicaPuesta
+  lufs: number
+  musica_db: number
+  efectos_db: number
+  efectos: EfectoSurtido[]
+  papeles: Record<string, { nombre: string; descripcion: string; cuantos: number }>
+  vetados: { clave: string; titulo: string; autor: string; papel: string; fecha: string }[]
+  animos: Record<string, string>
+  hay_jamendo: boolean
+  hay_freesound: boolean
+  resumen: string
+  creditos: CreditoMusica[]
+}
+
+/** Una carta del catálogo de transiciones (xfade = lo que corre el render). */
+export interface CartaTransicion {
+  id: string
+  puesta: boolean
+  nombre: string
+  descripcion: string
+  familia: string
+  fuerza: number
+  factor: number
+  xfade: string
+  defecto: boolean
+  origen: string
+}
+
+/** Qué transición lleva cada plano, resuelta por el motor. */
+export interface RepartoTransicion {
+  id: string
+  t_in: number
+  tipo: string
+  xfade: string | null
+  duracion: number
+  ranura: string
+}
+
+/** Respuesta de GET /{pid}/transiciones. */
+export interface FichaTransiciones {
+  transiciones: CartaTransicion[]
+  por_defecto: string[]
+  acento_cada: number
+  duracion: number
+  todas_de_fabrica: boolean
+  acento: { acento: number[]; oscuro: number[]; claro: number[] }
+  reparto: RepartoTransicion[]
+  resumen: string
 }
 
 export const ORDEN_PASOS: IdPaso[] = [

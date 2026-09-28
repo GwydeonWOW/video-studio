@@ -1,7 +1,7 @@
 /** Paneles de contenido para cada paso del pipeline. */
 import { useState } from "react"
 import { toast } from "sonner"
-import { AudioLines, BadgeCheck, Check, Loader2, Palette, PenLine, Play, RefreshCw } from "lucide-react"
+import { AudioLines, BadgeCheck, Check, Film, Loader2, Palette, PenLine, Play, RefreshCw } from "lucide-react"
 import { api } from "../../lib/api"
 import { segundos } from "../../lib/utils"
 import { usarTrabajo } from "../../lib/trabajos"
@@ -37,6 +37,11 @@ import {
 } from "../../components/ui/dialogo"
 import { Vacio } from "./piezas"
 import { DialogoGrafismo, type PestanaGrafismo } from "./grafismo"
+import {
+  DialogoSonido,
+  DialogoTransiciones,
+  type PestanaSonido,
+} from "./sonido"
 import {
   DialogoConservacion,
   DialogoEstiloVisual,
@@ -1077,13 +1082,60 @@ export function PanelCallouts({ pid, ficha, recargar }: PropsPanel) {
 
 /* --------------------------------------------------------------- 8 render */
 
-export function PanelRender({ pid, ficha }: PropsPanel) {
+export function PanelRender({ pid, ficha, recargar }: PropsPanel) {
+  const [sonido_abierto, setSonidoAbierto] = useState(false)
+  const [pestana_sonido, setPestanaSonido] = useState<PestanaSonido>("musica")
+  const [transiciones_abierto, setTransicionesAbierto] = useState(false)
+
+  const botones = (
+    <>
+      <Boton
+        variante="secundario"
+        tamano="pequeno"
+        onClick={() => setSonidoAbierto(true)}
+        title="Música por tono, banda por tramos, efectos por papel y sus niveles"
+      >
+        <AudioLines /> Sonido
+      </Boton>
+      <Boton
+        variante="secundario"
+        tamano="pequeno"
+        onClick={() => setTransicionesAbierto(true)}
+        title="Catálogo de transiciones con el efecto que correrá el render"
+      >
+        <Film /> Transiciones
+      </Boton>
+    </>
+  )
+  const dialogos = (
+    <>
+      <DialogoSonido
+        pid={pid}
+        abierto={sonido_abierto}
+        alCambiar={setSonidoAbierto}
+        pestana={pestana_sonido}
+        alPestana={setPestanaSonido}
+        recargar={recargar}
+      />
+      <DialogoTransiciones
+        pid={pid}
+        abierto={transiciones_abierto}
+        alCambiar={setTransicionesAbierto}
+        recargar={recargar}
+      />
+    </>
+  )
+
   if (ficha.estado === "vacio")
     return (
-      <Vacio
-        titulo="Sin vídeo"
-        detalle="Necesitas audio revisado, imágenes y rótulos; luego ejecuta el montaje."
-      />
+      <div className="space-y-4">
+        <Vacio
+          titulo="Sin vídeo"
+          detalle="Necesitas audio revisado, imágenes y rótulos; luego ejecuta el montaje."
+        />
+        <div className="flex flex-wrap items-center gap-2">{botones}</div>
+        {dialogos}
+      </div>
     )
   const datos = ficha.datos as DatosRender
   const url = `/a/${pid}/${datos.video}`
@@ -1101,12 +1153,22 @@ export function PanelRender({ pid, ficha }: PropsPanel) {
         <Insignia variante="secundario">{datos.fps} fps</Insignia>
         <Insignia variante="secundario">{datos.escenas} escenas</Insignia>
         {datos.masterizado && <Insignia variante="exito">masterizado</Insignia>}
+        {datos.sonido && datos.sonido !== "voz" && (
+          <Insignia variante="secundario">{datos.sonido}</Insignia>
+        )}
+        {datos.transiciones && (
+          <Insignia variante="secundario">{datos.transiciones}</Insignia>
+        )}
       </div>
-      <a href={url} download>
-        <Boton variante="contorno" tamano="pequeno">
-          Descargar mp4
-        </Boton>
-      </a>
+      <div className="flex flex-wrap items-center gap-2">
+        <a href={url} download>
+          <Boton variante="contorno" tamano="pequeno">
+            Descargar mp4
+          </Boton>
+        </a>
+        {botones}
+      </div>
+      {dialogos}
     </div>
   )
 }

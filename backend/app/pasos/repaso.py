@@ -115,6 +115,20 @@ AMBITOS = {
         "que_es": "algo que no se puede aplicar solo y hay que decidir a mano",
         "cuesta": "nada: se queda escrito",
     },
+    "transicion": {
+        "que_es": "con qué efectos de transición se unen los planos, y "
+                  "cuánto duran",
+        "cuesta": "nada: se re-monta el vídeo",
+    },
+    "musica": {
+        "que_es": "la música que suena debajo de la voz, y a qué nivel",
+        "cuesta": "nada: se re-monta el vídeo",
+    },
+    "efectos": {
+        "que_es": "los efectos de sonido (aires de transición, golpes), "
+                  "y a qué nivel",
+        "cuesta": "nada: se re-monta el vídeo",
+    },
 }
 
 
@@ -244,6 +258,63 @@ CAMBIOS = {
         "rehacer": [],
         "campos": {"texto": lambda v: _texto(v, 600)},
     },
+    # ---------------------------------------------------------- transicion
+    "transicion_duracion": {
+        "ambito": "transicion",
+        "que_es": "cuánto dura cada transición (0,1 a 1,5 s)",
+        "rehacer": ["render"],
+        "campos": {"valor": lambda v: _num(v, 0.1, 1.5)},
+    },
+    "transiciones": {
+        "ambito": "transicion",
+        "que_es": "qué efectos de transición entran en este vídeo: una "
+                  "lista con sus nombres del catálogo",
+        "rehacer": ["render"],
+        "campos": {"lista": lambda v: [str(x) for x in v] if isinstance(v, list)
+                   else None},
+    },
+    # ---------------------------------------------------------------- musica
+    "musica_db": {
+        "ambito": "musica",
+        "que_es": "cuánta música hay debajo de la voz, en dB (-24 a +24; "
+                  "0 es el punto calibrado)",
+        "rehacer": ["render"],
+        "campos": {"valor": lambda v: _num(v, -24.0, 24.0)},
+    },
+    "sin_musica": {
+        "ambito": "musica",
+        "que_es": "quita la música (el vídeo sale con voz y efectos)",
+        "rehacer": ["render"],
+        "campos": {},
+    },
+    "otra_musica": {
+        "ambito": "musica",
+        "que_es": "deja el hueco de música vacío: se elige otro tema en la "
+                  "pestaña de Sonido",
+        "rehacer": ["render"],
+        "campos": {},
+    },
+    # --------------------------------------------------------------- efectos
+    "efectos_db": {
+        "ambito": "efectos",
+        "que_es": "cuántos efectos hay, en dB (-24 a +24 sobre la pista ya "
+                  "montada)",
+        "rehacer": ["render"],
+        "campos": {"valor": lambda v: _num(v, -24.0, 24.0)},
+    },
+    "sin_efectos": {
+        "ambito": "efectos",
+        "que_es": "quita los efectos (el vídeo sale con voz y música)",
+        "rehacer": ["render"],
+        "campos": {},
+    },
+    "otros_efectos": {
+        "ambito": "efectos",
+        "que_es": "vuelve a surtir los efectos del banco (otros sonidos, "
+                  "los mismos papeles)",
+        "rehacer": ["efectos", "render"],
+        "campos": {},
+    },
 }
 
 #: DÓNDE ESCRIBE CADA CAMBIO (paso, cajón) — todos cajones que ALGUIEN lee.
@@ -257,6 +328,14 @@ DESTINOS = {
     "escena_texto": ("guion", "unidades.escena:*.texto"),
     "velocidad": ("voz", "velocidad"),
     "anotar": ("", ""),
+    "transicion_duracion": ("render", "duracion_transicion"),
+    "transiciones": ("render", "transiciones"),
+    "musica_db": ("render", "musica_db"),
+    "sin_musica": ("render", "musica"),
+    "otra_musica": ("render", "musica"),
+    "efectos_db": ("render", "efectos_db"),
+    "sin_efectos": ("render", "efectos"),
+    "otros_efectos": ("render", "efectos"),
 }
 
 

@@ -7,21 +7,31 @@ Por escena (duracion = la REAL de su audio):
    sobre el plano, alpha).
 3. El audio de la escena viaja con el segmento.
 
-Despues: concat de segmentos (mismos codecs, sin recodificar) y una pasada
-de masterizacion loudnorm (I=-16, TP=-1.5, LRA=11, norma de podcast/video).
+Despues, dos caminos:
+    sin extras     concat de segmentos (mismos codecs, sin recodificar) y
+                   masterizacion loudnorm en dos pasadas.
+    con sonido     la voz se concatena aparte y se mezcla con la musica
+                   (cama o tema suelto, con ducking de llave aplanada) y
+                   los efectos (pista numpy igualada por papel), todo segun
+                   `sonido.filtro_de_mezcla`; el video se une con las
+                   TRANSICIONES que reparte `transiciones.resolver`
+                   (xfade de ffmpeg, determinista por semilla).
 
 Sin shell=True en NINGUNA llamada: listas de argumentos siempre
 (docs/AUDITORIA.md H2).
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 
 from ..config import AJUSTES
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief
+from . import comun, p2_brief, sonido, transiciones
 
 FPS = 30
 ANCHO, ALTO = 1920, 1080
@@ -37,7 +47,12 @@ FUENTES = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 
 
 def params_defecto() -> dict:
-    return {"calidad": "estandar", "resolucion": "1920x1080", "fps": FPS}
+    return {"calidad": "estandar", "resolucion": "1920x1080", "fps": FPS,
+            # sonido: lo que se decidió una vez en la pantalla de Sonido y
+            # viaja en los params del render (la firma sólo del render)
+            "sonido": True, "musica": {}, "musica_lufs": sonido.MUSICA_LUFS,
+            "musica_db": 0.0, "efectos_db": 0.0, "efectos": {},
+            "transiciones": [], "duracion_transicion": 0.4}
 
 
 def estimar(params: dict) -> dict:
@@ -281,6 +296,166 @@ def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None
     return destino
 
 
+def _voz_wav(proyecto: Proyecto, voz: dict, destino: Path) -> Path:
+    """Concatena los audios de escena en un WAV 48k estéreo.
+
+    Con N entradas y `concat` de filtro (no del demuxor): los TTS pueden
+    venir mezclados en frecuencia y el demuxor exige ficheros idénticos.
+    """
+    rutas = [proyecto.ruta(e["audio"]) for e in voz["escenas"]]
+    orden = [comun.ffmpeg(), "-y", "-loglevel", "error"]
+    for ruta in rutas:
+        orden += ["-i", str(ruta)]
+    trozos = [f"[{i}:a]aresample={sonido.FRECUENCIA},"
+              f"aformat=channel_layouts=stereo[a{i}]"
+              for i in range(len(rutas))]
+    grafo = ";".join(trozos + ["".join(f"[a{i}]" for i in range(len(rutas)))
+                               + f"concat=n={len(rutas)}:v=0:a=1[voz]"])
+    orden += ["-filter_complex", grafo, "-map", "[voz]",
+              "-c:a", "pcm_s16le", str(destino)]
+    proceso = subprocess.run(orden, capture_output=True, text=True,
+                             timeout=3600)
+    if proceso.returncode != 0 or not destino.exists():
+        raise RuntimeError(f"fallo al concatenar la voz: {proceso.stderr[-400:]}")
+    return destino
+
+
+def _medir_master(ruta: Path) -> dict | None:
+    """La primera pasada del master: mide, no toca. None si no sale."""
+    proceso = subprocess.run(
+        [comun.ffmpeg(), "-hide_banner", "-nostats", "-i", str(ruta),
+         "-af", sonido.filtro_master(), "-f", "null", "-"],
+        capture_output=True, text=True, timeout=600)
+    bloque = re.findall(r"\{[^{}]*\"input_i\"[^{}]*\}", proceso.stderr or "")
+    if not bloque:
+        return None
+    try:
+        return json.loads(bloque[-1])
+    except ValueError:
+        return None
+
+
+def _montar_audio(proyecto: Proyecto, voz: dict, params: dict, cortes: list,
+                  reparto: dict, total: float, temporal: Path, trabajo) -> Path:
+    """La mezcla entera: voz + música (con ducking) + efectos. A WAV.
+
+    De aquí sale el audio FINAL ya masterizado (dos pasadas: medir, y
+    aplicar una ganancia constante — una sola pasada es adaptativa y se
+    oye como bombeo). Lo que falte (un tema que ya no está, sin claves)
+    se degrada: sale sin eso y el trabajo lo cuenta.
+    """
+    con_sonido = bool(params.get("sonido", True))
+    musica = (params.get("musica") or {}) if con_sonido else {}
+    surtido = (params.get("efectos") or {}) if con_sonido else {}
+    voz_wav = _voz_wav(proyecto, voz, temporal / "voz.wav")
+
+    entradas = ["-i", str(voz_wav)]
+    con_musica = con_efectos = False
+    cama = False
+    if musica:
+        try:
+            if musica.get("tramos"):
+                trabajo.avance("montando la cama de música por tramos")
+                pista, faltan = sonido.construir_cama(
+                    musica, total, temporal / "musica.wav")
+                if faltan:
+                    trabajo.avance(f"cama: faltaban {len(faltan)} tema(s); "
+                                   "sigue con los que hay")
+                if pista:
+                    entradas += ["-i", str(pista)]
+                    con_musica, cama = True, True
+            elif musica.get("id"):
+                tema = sonido.traer(musica, "musica")
+                entradas += ["-i", str(tema)]
+                con_musica = True
+        except Exception as fallo:            # degradar antes que tumbar
+            trabajo.avance(f"sin música: {str(fallo)[:160]}")
+    if surtido:
+        try:
+            cartela_de = {}
+            assets = p2_brief.proyecto_leer_datos(proyecto, "assets")
+            for p in assets.get("planos", []):
+                if isinstance(p, dict) and p.get("cartela"):
+                    cartela_de[str(p.get("escena"))] = True
+            trabajo.avance("mezclando los efectos del banco")
+            lista = sonido.eventos(cortes, reparto, params,
+                                   semilla=_semilla_de(proyecto),
+                                   cartela_de=cartela_de)
+            if lista:
+                pista, usados = sonido.pista_de_efectos(
+                    lista, total, temporal / "efectos.wav")
+                trabajo.avance(f"{usados} efectos colocados")
+                entradas += ["-i", str(pista)]
+                con_efectos = True
+        except Exception as fallo:
+            trabajo.avance(f"sin efectos: {str(fallo)[:160]}")
+
+    if not con_musica and not con_efectos:
+        return voz_wav
+    grafo = sonido.filtro_de_mezcla(
+        con_musica, con_efectos, total,
+        lufs=float(params.get("musica_lufs") or sonido.MUSICA_LUFS),
+        ya_normalizada=cama,
+        ajuste_db=float(params.get("musica_db") or 0.0),
+        efectos_db=float(params.get("efectos_db") or 0.0))
+    mezcla = temporal / "mezcla.wav"
+    proceso = subprocess.run(
+        [comun.ffmpeg(), "-y", "-loglevel", "error", *entradas,
+         "-filter_complex", grafo, "-map", "[salida]", "-c:a", "pcm_s16le",
+         str(mezcla)],
+        capture_output=True, text=True, timeout=3600)
+    if proceso.returncode != 0 or not mezcla.exists():
+        raise RuntimeError(f"fallo al mezclar el audio: {proceso.stderr[-400:]}")
+    return mezcla
+
+
+def _semilla_de(proyecto: Proyecto) -> int:
+    return int.from_bytes(hashlib.sha1(proyecto.id.encode()).digest()[:8],
+                          "big")
+
+
+def _unir_con_transiciones(segmentos: list[Path], reparto: dict, sids: list,
+                            calidad: str, destino: Path) -> Path:
+    """La cadena de xfade: qué efecto de ffmpeg lleva cada corte.
+
+    Los cortes secos se unen con `concat` dentro del mismo grafo: en cuanto
+    hay UNA transición todo el vídeo se re-codifica una vez (no por junta),
+    y la duración de cada transición se recorta a lo que DE VERDAD duran
+    los segmentos codificados.
+    """
+    ajustes = CALIDADES.get(calidad, CALIDADES["estandar"])
+    duraciones = [comun.duracion_de(s) for s in segmentos]
+    orden = [comun.ffmpeg(), "-y", "-loglevel", "error"]
+    for s in segmentos:
+        orden += ["-i", str(s)]
+    partes, total = [], duraciones[0] if duraciones else 0.0
+    previo = "[0:v]"
+    for i in range(1, len(segmentos)):
+        ficha = reparto.get(sids[i]) or {}
+        efecto, dura = ficha.get("xfade"), float(ficha.get("duracion") or 0)
+        dura = min(dura, duraciones[i - 1] * 0.9, duraciones[i] * 0.9)
+        etiqueta = f"[v{i}]"
+        if not efecto or dura <= 0.01:
+            partes.append(f"{previo}[{i}:v]concat=n=2:v=1:a=0{etiqueta}")
+            total += duraciones[i]
+        else:
+            offset = max(0.0, total - dura)
+            partes.append(f"{previo}[{i}:v]xfade=transition={efecto}"
+                          f":duration={dura:.3f}:offset={offset:.3f}{etiqueta}")
+            total += duraciones[i] - dura
+        previo = etiqueta
+    orden += ["-filter_complex", ";".join(partes), "-map", previo,
+              "-c:v", "libx264", "-preset", ajustes["preset"],
+              "-crf", ajustes["crf"], "-pix_fmt", "yuv420p", "-r", str(FPS),
+              "-an", str(destino)]
+    proceso = subprocess.run(orden, capture_output=True, text=True,
+                             timeout=3600)
+    if proceso.returncode != 0 or not destino.exists():
+        raise RuntimeError(f"fallo al unir con transiciones: "
+                           f"{proceso.stderr[-400:]}")
+    return destino
+
+
 def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     voz = p2_brief.proyecto_leer_datos(proyecto, "voz")
     assets = p2_brief.proyecto_leer_datos(proyecto, "assets")
@@ -297,7 +472,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
                     "paleta": callouts.get("paleta") or {},
                     "tam": callouts.get("subtitulo_tam", "normal")}
     temporal = Path(tempfile.mkdtemp(prefix="render_"))
-    segmentos = []
+    segmentos, sids, cortes = [], [], []
     total = 0.0
     for indice, escena in enumerate(voz["escenas"], start=1):
         trabajo.comprobar_cancelacion()
@@ -310,35 +485,104 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
         _segmento(proyecto, escena, plano, rotulos_de.get(escena["id"]),
                   destino, calidad, trabajo, cfg_grafismo)
         segmentos.append(destino)
-        total += float(escena["duracion"])
-    # concatenar (mismos codecs: copia sin recodificar)
-    trabajo.avance("concatenando segmentos")
-    lista = temporal / "lista.txt"
-    lista.write_text("".join(f"file '{s.as_posix()}'\n" for s in segmentos),
-                     encoding="utf-8")
-    bruto = temporal / "bruto.mp4"
-    proceso = subprocess.run(
-        [comun.ffmpeg(), "-y", "-loglevel", "error", "-f", "concat",
-         "-safe", "0", "-i", str(lista), "-c", "copy", str(bruto)],
-        capture_output=True, text=True, timeout=3600)
-    if proceso.returncode != 0:
-        raise RuntimeError(f"fallo al concatenar: {proceso.stderr[-400:]}")
-    # masterizacion de audio (una pasada; si loudnorm falla, sale sin master
-    # — degradar antes que tumbar, como el original)
-    trabajo.avance("masterizando audio")
+        sids.append(escena["id"])
+        dur = float(escena["duracion"])
+        cortes.append({"id": escena["id"], "t_in": round(total, 3),
+                       "t_out": round(total + dur, 3),
+                       "duracion": dur})
+        total += dur
+    # QUÉ TRANSICIÓN LLEVA CADA PLANO: determinista (semilla del vídeo), y
+    # sólo toca la firma del render — cambiar la paleta no toca las imágenes
+    reparto = transiciones.resolver(cortes, params, semilla=_semilla_de(proyecto))
+    hay_transiciones = any(f.get("tipo") not in (None, "corte")
+                           for f in reparto.values())
     destino_final = proyecto.carpeta_paso("render") / "final.mp4"
     destino_final.parent.mkdir(parents=True, exist_ok=True)
-    proceso = subprocess.run(
-        [comun.ffmpeg(), "-y", "-loglevel", "error", "-i", str(bruto),
-         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "copy",
-         "-c:a", "aac", "-b:a", "192k", str(destino_final)],
-        capture_output=True, text=True, timeout=3600)
-    if proceso.returncode != 0 or not destino_final.exists():
-        trabajo.avance("loudnorm fallo; el vídeo sale sin masterizar")
-        destino_final = bruto
+    masterizado = False
+
+    if hay_transiciones or params.get("musica") or params.get("efectos") \
+            or params.get("sonido", True) is False:
+        # camino con MEZCLA aparte: la voz se concatena sola y se mezcla
+        # con lo que digan los params (que puede ser «nada»: sonido False
+        # es un vídeo mudo a propósito, no un descuido)
+        trabajo.avance("mezclando el audio" if params.get("sonido", True)
+                       else "vídeo sin sonido (a propósito)")
+        audio = _montar_audio(proyecto, voz, params, cortes, reparto, total,
+                              temporal, trabajo) if params.get("sonido", True) \
+            else None
+        trabajo.avance("uniendo los planos"
+                       + (" con transiciones" if hay_transiciones else ""))
+        if hay_transiciones:
+            video = _unir_con_transiciones(segmentos, reparto, sids, calidad,
+                                           temporal / "video.mp4")
+        else:
+            lista = temporal / "lista.txt"
+            lista.write_text("".join(f"file '{s.as_posix()}'\n"
+                                     for s in segmentos), encoding="utf-8")
+            video = temporal / "bruto.mp4"
+            proceso = subprocess.run(
+                [comun.ffmpeg(), "-y", "-loglevel", "error", "-f", "concat",
+                 "-safe", "0", "-i", str(lista), "-c", "copy", str(video)],
+                capture_output=True, text=True, timeout=3600)
+            if proceso.returncode != 0:
+                raise RuntimeError(f"fallo al concatenar: {proceso.stderr[-400:]}")
+        # master en dos pasadas: medir, y aplicar una ganancia CONSTANTE
+        trabajo.avance("masterizando audio")
+        filtros = None
+        if audio is not None:
+            medida = _medir_master(audio)
+            if medida:
+                filtros = sonido.filtro_master(medida)
+                masterizado = True
+            else:
+                trabajo.avance("la medida del master falló; sale sin masterizar")
+        orden = [comun.ffmpeg(), "-y", "-loglevel", "error",
+                 "-i", str(video)] + (["-i", str(audio)] if audio else [])
+        orden += ["-map", "0:v"]
+        if audio is not None:
+            orden += ["-map", "1:a"]
+            if filtros:
+                orden += ["-af", filtros]
+            orden += ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            orden += ["-an"]
+        orden += ["-c:v", "copy", "-movflags", "+faststart",
+                  str(destino_final)]
+        proceso = subprocess.run(orden, capture_output=True, text=True,
+                                 timeout=3600)
+        if proceso.returncode != 0 or not destino_final.exists():
+            raise RuntimeError(f"fallo al montar el vídeo final: "
+                               f"{proceso.stderr[-400:]}")
+    else:
+        # camino rápido de siempre: concat en copia + loudnorm en una pasada
+        trabajo.avance("concatenando segmentos")
+        lista = temporal / "lista.txt"
+        lista.write_text("".join(f"file '{s.as_posix()}'\n" for s in segmentos),
+                         encoding="utf-8")
+        bruto = temporal / "bruto.mp4"
+        proceso = subprocess.run(
+            [comun.ffmpeg(), "-y", "-loglevel", "error", "-f", "concat",
+             "-safe", "0", "-i", str(lista), "-c", "copy", str(bruto)],
+            capture_output=True, text=True, timeout=3600)
+        if proceso.returncode != 0:
+            raise RuntimeError(f"fallo al concatenar: {proceso.stderr[-400:]}")
+        # masterizacion de audio (una pasada; si loudnorm falla, sale sin
+        # master — degradar antes que tumbar, como el original)
+        trabajo.avance("masterizando audio")
+        proceso = subprocess.run(
+            [comun.ffmpeg(), "-y", "-loglevel", "error", "-i", str(bruto),
+             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:v", "copy",
+             "-c:a", "aac", "-b:a", "192k", str(destino_final)],
+            capture_output=True, text=True, timeout=3600)
+        if proceso.returncode != 0 or not destino_final.exists():
+            trabajo.avance("loudnorm fallo; el vídeo sale sin masterizar")
+            destino_final = bruto
+        masterizado = destino_final != bruto
     duracion = comun.duracion_de(destino_final)
     trabajo.avance(f"vídeo listo: {round(duracion)} s, "
                    f"{destino_final.name}")
     return {"video": "pasos/render/final.mp4", "duracion": duracion,
             "fps": FPS, "resolucion": f"{ANCHO}x{ALTO}",
-            "escenas": len(segmentos), "masterizado": destino_final != bruto}
+            "escenas": len(segmentos), "masterizado": masterizado,
+            "sonido": sonido.describir(params),
+            "transiciones": transiciones.describir(params)}

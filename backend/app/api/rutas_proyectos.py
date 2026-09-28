@@ -33,7 +33,8 @@ from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
 from ..nucleo.trabajos import TrabajoCancelado
 from ..pasos import (cartelas, catalogo_visual, comun, conservar, direccion,
                      encuadres, guia_estilo, moodboard, p2_brief, p3_guion,
-                     p4_voz, p6_assets, redactor, registro, repaso)
+                     p4_voz, p6_assets, redactor, registro, repaso, sonido,
+                     transiciones)
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
@@ -1770,6 +1771,34 @@ def _aplicar_cambios(proyecto: Proyecto, cambios: list[dict],
         elif tipo == "velocidad":
             extras.setdefault("voz", {})["velocidad"] = cambio["valor"]
             unidades["voz"] = None      # TODO el paso: la velocidad es global
+        elif tipo == "transicion_duracion":
+            extras.setdefault("render", {})["duracion_transicion"] = \
+                cambio["valor"]
+        elif tipo == "transiciones":
+            validas = [t for t in cambio["lista"]
+                       if t in transiciones.CATALOGO]
+            extras.setdefault("render", {})["transiciones"] = \
+                validas or list(transiciones.POR_DEFECTO)
+        elif tipo == "musica_db":
+            extras.setdefault("render", {})["musica_db"] = cambio["valor"]
+        elif tipo == "efectos_db":
+            extras.setdefault("render", {})["efectos_db"] = cambio["valor"]
+        elif tipo in ("sin_musica", "otra_musica"):
+            extras.setdefault("render", {})["musica"] = {}
+        elif tipo == "sin_efectos":
+            extras.setdefault("render", {})["efectos"] = {}
+        elif tipo == "otros_efectos":
+            # VUELVE A SURTIR: lo limpia y busca otros sonidos para los
+            # mismos papeles. Sin claves se queda limpio y se dice.
+            extras.setdefault("render", {})["efectos"] = {}
+            try:
+                nuevo = {papel: sonido.surtir(papel)
+                         for papel in sonido.PAPELES}
+                extras["render"]["efectos"] = nuevo
+                trabajo.avance(f"efectos re-surtidos: "
+                               f"{sum(len(v) for v in nuevo.values())}")
+            except RuntimeError as fallo:
+                trabajo.avance(f"no se pudieron re-surtir: {str(fallo)[:160]}")
 
     with lock_de(proyecto.id):
         for paso, extra in extras.items():
@@ -2362,3 +2391,311 @@ def aplicar_conservacion(pid: str, cuerpo: dict) -> dict:
     return {**resultado,
             "obsoletos_assets": estado.unidades_obsoletas("assets"),
             "obsoletos_voz": estado.unidades_obsoletas("voz")}
+
+
+# ============================================================== FASE G: sonido
+#
+# El contrato de arriba para abajo: BUSCAR sale a la red y se hace con una
+# persona delante (escuchando); RENDERIZAR no sale a la red (el banco ya
+# tiene los ficheros). Nada de esto genera vídeo: escribe los params del
+# render y ya.
+
+@router.get("/{pid}/sonido")
+def leer_sonido(pid: str) -> dict:
+    """Qué suena en este vídeo: música, efectos, interruptor y niveles."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("render").get("params") or {}
+    hay_jamendo, hay_freesound = sonido.hay_claves()
+    prohibidos = sonido.vetados()
+    surtido = params.get("efectos") or {}
+    efectos = []
+    for papel, fichas in surtido.items():
+        for ficha in (fichas or []):
+            clave = sonido.clave_de(ficha)
+            nombre = sonido._nombre_de(ficha)
+            efectos.append({
+                **{k: ficha.get(k) for k in
+                   ("fuente", "id", "titulo", "autor", "duracion", "licencia",
+                    "etiquetas", "brillo", "dureza", "reverb", "error")},
+                "papel": papel, "clave": clave,
+                "en_banco": sonido.banco("efectos", nombre).exists(),
+                "muestra": f"/api/proyectos/efectos-banco/{nombre}",
+                "vetado": clave in prohibidos,
+                "agudo": sonido.agudeza(ficha),
+            })
+    vetados = [{"clave": v["clave"], "titulo": v.get("titulo") or "",
+                "autor": v.get("autor") or "", "papel": v.get("papel") or "",
+                "fecha": v.get("fecha") or ""}
+               for v in prohibidos.values()]
+    return {
+        "activo": bool(params.get("sonido", True)),
+        "musica": params.get("musica") or {},
+        "lufs": float(params.get("musica_lufs") or sonido.MUSICA_LUFS),
+        "musica_db": float(params.get("musica_db") or 0.0),
+        "efectos_db": float(params.get("efectos_db") or 0.0),
+        "efectos": efectos,
+        "papeles": {papel: {"nombre": f["nombre"],
+                            "descripcion": f["descripcion"],
+                            "cuantos": len(surtido.get(papel) or [])}
+                    for papel, f in sonido.PAPELES.items()},
+        "vetados": vetados,
+        "animos": sonido.ANIMOS,
+        "hay_jamendo": hay_jamendo, "hay_freesound": hay_freesound,
+        "resumen": sonido.describir(params),
+        "creditos": _creditos_musica(params.get("musica") or {}),
+    }
+
+
+def _creditos_musica(musica: dict) -> list[dict]:
+    """Los créditos de lo que suena: Jamendo/FreeSound lo piden y el vídeo
+    los debe. Del lado del canal, junto al banco."""
+    salida = []
+    if musica.get("tramos"):
+        for tramo in musica["tramos"]:
+            salida.append({"titulo": tramo.get("titulo") or "",
+                           "artista": tramo.get("artista") or "",
+                           "fuente": "Jamendo",
+                           "licencia": tramo.get("licencia") or ""})
+    elif musica.get("id"):
+        salida.append({"titulo": musica.get("titulo") or "",
+                       "artista": musica.get("artista") or "",
+                       "fuente": "Jamendo",
+                       "licencia": musica.get("licencia") or ""})
+    return salida
+
+
+@router.put("/{pid}/sonido", dependencies=_MUTAR)
+def guardar_sonido(pid: str, cuerpo: dict | None = None) -> dict:
+    """El interruptor, el nivel y EL TEMA ÚNICO. La banda va por su ruta.
+
+    Elegir tema es SURTIR: se descarga al banco AQUÍ (con la persona
+    delante, que acaba de escucharlo), y a partir de ahí es un dato.
+    """
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    extras: dict = {}
+    if "activo" in cuerpo:
+        extras["sonido"] = bool(cuerpo["activo"])
+    if "lufs" in cuerpo:
+        try:
+            lufs = float(cuerpo["lufs"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "lufs tiene que ser un número") from None
+        extras["musica_lufs"] = max(-40.0, min(-10.0, lufs))
+    for campo in ("musica_db", "efectos_db"):
+        if campo in cuerpo:
+            try:
+                extras[campo] = max(-24.0, min(24.0, float(cuerpo[campo])))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{campo} tiene que ser un número") \
+                    from None
+    if "musica" in cuerpo:
+        musica = cuerpo["musica"]
+        if musica in (None, {}, ""):
+            extras["musica"] = {}
+        elif isinstance(musica, dict) and musica.get("id"):
+            try:
+                sonido.traer(musica, "musica")
+            except Exception as fallo:            # noqa: BLE001
+                raise HTTPException(502, f"no se pudo bajar el tema: "
+                                          f"{str(fallo)[:160]}") from None
+            extras["musica"] = musica
+        else:
+            raise HTTPException(400, "musica tiene que ser un tema o nada")
+    estado = Estado(proyecto)
+    with lock_de(proyecto.id):
+        if extras:
+            estado.actualizar_params("render", extras)
+        if "activo" in extras:
+            proyecto.bitacora("sonido", {"activo": extras["activo"]})
+        if extras.get("musica"):
+            proyecto.bitacora("musica_puesta", {
+                "titulo": extras["musica"].get("titulo"),
+                "artista": extras["musica"].get("artista")})
+    return leer_sonido(pid)
+
+
+@router.post("/{pid}/sonido/musica")
+def buscar_musica_ruta(pid: str, cuerpo: dict | None = None) -> dict:
+    """Busca temas en Jamendo según el tono del vídeo. Escuchar y elegir."""
+    _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    try:
+        temas = sonido.buscar_musica(
+            animo=str(cuerpo.get("animo") or "sobrio"),
+            cuantas=int(cuerpo.get("cuantas") or 12),
+            duracion_s=float(cuerpo.get("duracion_s") or 0),
+            velocidad=str(cuerpo.get("velocidad") or "low"),
+            instrumental=bool(cuerpo.get("instrumental", True)),
+            extra=str(cuerpo.get("extra") or "")[:60])
+    except RuntimeError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    except Exception as fallo:                    # noqa: BLE001
+        raise HTTPException(502, f"Jamendo no respondió: {str(fallo)[:160]}") \
+            from None
+    return {"temas": temas}
+
+
+@router.get("/{pid}/sonido/arco")
+def arco_sonido(pid: str) -> dict:
+    """En qué tramos se parte el vídeo y qué ánimo pediría para cada uno."""
+    proyecto = _proyecto_o_404(pid)
+    cortes = _tiempos_de(proyecto)
+    if not cortes:
+        raise HTTPException(400, "no hay voz grabada: el ritmo se lee del "
+                                 "montaje, no del guion")
+    duracion = sum(c["t_out"] - c["t_in"] for c in cortes)
+    return {"duracion": round(duracion, 2),
+            "tramos": sonido.arco_del_video(cortes, duracion)}
+
+
+@router.post("/{pid}/sonido/banda", status_code=202, dependencies=_MUTAR)
+def montar_banda_ruta(pid: str) -> dict:
+    """Monta la banda sonora por tramos (trabajo de cola: sale a la red)."""
+    proyecto = _proyecto_o_404(pid)
+    cortes = _tiempos_de(proyecto)
+    if not cortes:
+        raise HTTPException(400, "no hay voz grabada: sin el ritmo del "
+                                 "montaje no hay tramos")
+    if not sonido.hay_claves()[0]:
+        raise HTTPException(400, "falta la clave de Jamendo (Configuración)")
+    duracion = sum(c["t_out"] - c["t_in"] for c in cortes)
+
+    def funcion(trabajo):
+        ficha = sonido.montar_banda(cortes, duracion, avisar=trabajo.avance)
+        with lock_de(proyecto.id):
+            Estado(proyecto).actualizar_params("render",
+                                               {"musica": ficha})
+        proyecto.bitacora("banda_montada", {"tramos": len(ficha["tramos"])})
+        return ficha
+
+    trabajo = GESTOR.lanzar(pid, "banda", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+@router.post("/{pid}/sonido/efectos", status_code=202, dependencies=_MUTAR)
+def surtir_efectos(pid: str, cuerpo: dict | None = None) -> dict:
+    """Surtido de efectos por papel (trabajo de cola: sale a la red)."""
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    papeles = [p for p in (cuerpo.get("papeles") or sonido.PAPELES)
+               if p in sonido.PAPELES] or list(sonido.PAPELES)
+    salteado = int(cuerpo.get("salteado") or 0)
+    if not sonido.hay_claves()[1]:
+        raise HTTPException(400, "falta la clave de FreeSound (Configuración)")
+
+    def funcion(trabajo):
+        nuevo = {}
+        for indice, papel in enumerate(papeles):
+            trabajo.avance(0.1 + 0.8 * indice / len(papeles),
+                           f"surtiendo {sonido.PAPELES[papel]['nombre']}")
+            nuevo[papel] = sonido.surtir(papel, salteado=salteado)
+        estado = Estado(proyecto)
+        previo = (estado.paso("render").get("params") or {}).get("efectos") or {}
+        # los papeles NO pedidos se quedan como están: re-surtir uno no
+        # vacía los demás
+        mezcla = {**{k: v for k, v in previo.items() if k not in papeles},
+                  **nuevo}
+        with lock_de(proyecto.id):
+            estado.actualizar_params("render", {"efectos": mezcla})
+        proyecto.bitacora("efectos_surtidos",
+                          {"cuantos": sum(len(v) for v in nuevo.values())})
+        return {"papeles": {k: len(v) for k, v in nuevo.items()}}
+
+    trabajo = GESTOR.lanzar(pid, "efectos", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+@router.post("/{pid}/sonido/vetados", dependencies=_MUTAR)
+def vetar_efecto(pid: str, cuerpo: dict) -> dict:
+    """Veta (o desveta) un efecto para todo el canal."""
+    _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    ficha = cuerpo.get("efecto") or cuerpo
+    if cuerpo.get("quitar"):
+        quito = sonido.desvetar(ficha)
+        return {"ok": quito, "vetados": list(sonido.vetados())}
+    try:
+        entrada = sonido.vetar(ficha, papel=cuerpo.get("papel"),
+                               motivo=cuerpo.get("motivo") or "")
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    return {"ok": True, "veto": entrada, "vetados": list(sonido.vetados())}
+
+
+@router.get("/efectos-banco/{archivo}")
+def oir_efecto(archivo: str):
+    """Un efecto del banco, PARA OÍRLO en la pantalla. Read-only."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", archivo) or ".." in archivo:
+        raise HTTPException(404, "archivo desconocido")
+    ruta = sonido.banco("efectos", archivo)
+    if not ruta.is_file():
+        raise HTTPException(404, "ese efecto no está en el banco")
+    return FileResponse(ruta)
+
+
+# ---------------------------------------------------------- transiciones
+
+@router.get("/{pid}/transiciones")
+def leer_transiciones(pid: str) -> dict:
+    """Las transiciones que existen y cuáles entran en este vídeo."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("render").get("params") or {}
+    elegidas = transiciones.elegidas_de(params)
+    ficha = transiciones.catalogo_para_pantalla(elegidas)
+    try:
+        ficha["duracion"] = float(params.get("duracion_transicion") or 0.4)
+    except (TypeError, ValueError):
+        ficha["duracion"] = 0.4
+    ficha["todas_de_fabrica"] = not [t for t in (params.get("transiciones")
+                                                 or [])]
+    # el acento cromático de ESTE vídeo (paleta de callouts o de la guía)
+    paleta = {}
+    callouts = p2_brief.proyecto_leer_datos(proyecto, "callouts") or {}
+    if isinstance(callouts.get("paleta"), dict):
+        paleta = callouts["paleta"]
+    if not paleta.get("acento"):
+        guia_params = estado.paso("assets").get("params") or {}
+        colores = (guia_estilo.guia_de(guia_params).get("paleta") or [])
+        if colores:
+            paleta = {"acento": colores[0]}
+    ficha["acento"] = transiciones.acentos(paleta)
+    # QUÉ TRANSICIÓN LLEVA CADA PLANO, resuelta por el motor (determinista):
+    # viaja a la pantalla para que elegir mirando sea elegir de verdad
+    import hashlib                                          # noqa: PLC0415
+    cortes = _tiempos_de(proyecto)
+    semilla = int.from_bytes(hashlib.sha1(pid.encode()).digest()[:8], "big")
+    reparto = transiciones.resolver(cortes, params, semilla=semilla)
+    ficha["reparto"] = [{"id": c["id"], "t_in": c["t_in"],
+                         **reparto.get(c["id"], {})}
+                        for c in cortes if c["id"] in reparto]
+    ficha["resumen"] = transiciones.describir(params)
+    return ficha
+
+
+@router.put("/{pid}/transiciones", dependencies=_MUTAR)
+def guardar_transiciones(pid: str, cuerpo: dict | None = None) -> dict:
+    """La paleta de transiciones y su duración. Sólo toca el render."""
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    estado = Estado(proyecto)
+    extras: dict = {}
+    if "transiciones" in cuerpo:
+        lista = cuerpo["transiciones"]
+        if not isinstance(lista, list):
+            raise HTTPException(400, "transiciones tiene que ser una lista")
+        validas = [t for t in lista if t in transiciones.CATALOGO]
+        extras["transiciones"] = validas      # vacío = las de fábrica
+    if "duracion" in cuerpo:
+        try:
+            duracion = float(cuerpo["duracion"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "duracion tiene que ser un número") \
+                from None
+        extras["duracion_transicion"] = max(0.1, min(1.5, duracion))
+    with lock_de(proyecto.id):
+        estado.actualizar_params("render", extras)
+        proyecto.bitacora("transiciones", extras)
+    return leer_transiciones(pid)
