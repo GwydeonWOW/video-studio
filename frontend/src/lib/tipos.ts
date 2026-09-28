@@ -394,6 +394,13 @@ export interface EstadoAuth {
   autenticado: boolean
 }
 
+/** Ajustes del servidor (GET /api/ajustes): modelos por rol y la marca
+ * de la guía de inicio (ausente = aún sin ver). */
+export interface Ajustes {
+  llm?: Record<string, { proveedor: string; modelo: string }>
+  onboarding_visto?: boolean
+}
+
 export interface ClaveEstado {
   clave: string
   etiqueta: string

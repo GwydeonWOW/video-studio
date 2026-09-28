@@ -1,7 +1,7 @@
 /** Configuración del servicio: claves, modelos por rol, voces, tarifas y coste. */
 import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Check, Copy, KeyRound, Loader2, Mic2, Save } from "lucide-react"
+import { BookOpen, Check, Copy, KeyRound, Loader2, Mic2, Save } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
 import type {
@@ -12,6 +12,7 @@ import type {
   Voz,
 } from "../lib/tipos"
 import { NOMBRES_PASOS, ORDEN_PASOS } from "../lib/tipos"
+import { GuiaInicio } from "../components/guia_inicio"
 import { Boton } from "../components/ui/button"
 import { Insignia } from "../components/ui/badge"
 import { Entrada } from "../components/ui/input"
@@ -55,9 +56,21 @@ const ROLES: { id: string; etiqueta: string; ayuda: string }[] = [
 ]
 
 export default function Configuracion() {
+  const [guia, setGuia] = useState(false)
   return (
     <div className="mx-auto max-w-4xl space-y-4">
-      <h1 className="text-xl font-semibold tracking-tight">Configuración</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-xl font-semibold tracking-tight">Configuración</h1>
+        <Boton
+          variante="fantasma"
+          tamano="pequeno"
+          onClick={() => setGuia(true)}
+          title="La guía de la primera vez, con los enlaces de las claves"
+        >
+          <BookOpen /> Volver a ver la guía de inicio
+        </Boton>
+      </div>
+      {guia && <GuiaInicio alCerrar={() => setGuia(false)} />}
       <Pestanas valorPorDefecto="claves">
         <ListaPestanas className="flex w-full flex-wrap">
           <DisparadorPestanas valor="claves">Claves</DisparadorPestanas>

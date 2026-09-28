@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
-import { ArrowLeft, BookOpen, Camera, ChevronLeft, ChevronRight, ClipboardCopy, Eye, Loader2, MessageSquareHeart, Palette, Pause, Play, Settings2, Wallet, Zap } from "lucide-react"
+import { ArrowLeft, BookOpen, Camera, ChevronLeft, ChevronRight, ClipboardCopy, ClipboardList, Eye, Loader2, MessageSquareHeart, Palette, Pause, Play, Settings2, Wallet, Zap } from "lucide-react"
 import { api } from "../lib/api"
 import { apuntarPantalla } from "../lib/pantalla"
 import { dolares, segundos } from "../lib/utils"
@@ -49,12 +49,31 @@ import {
   type PropsPanel,
 } from "./proyecto/paneles"
 import { PanelRepaso } from "./proyecto/repaso"
+import { PanelEncargo } from "./proyecto/encargo"
 
-/** el pipeline + la pantalla de repaso (que vive sobre el montado) */
-type IdPantalla = IdPaso | "repaso"
+/** el pipeline + el encargo + la pantalla de repaso (sobre el montado) */
+type IdPantalla = IdPaso | "encargo" | "repaso"
+/** las que se recorren una a una en la columna de pasos */
 const PANTALLAS: IdPantalla[] = [...ORDEN_PASOS, "repaso"]
 
-const PANELES: Record<IdPantalla, (p: PropsPanel) => JSX.Element> = {
+// NOMBRES_PASOS es Record<string,string>: el spread no aporta teclas
+// estáticas, así que se escriben una a una para que el compilador
+// eche en falta cualquier pantalla nueva sin nombre.
+const NOMBRE_PANTALLA: Record<IdPantalla, string> = {
+  ingesta: "Material",
+  brief: "Brief",
+  guion: "Guion",
+  voz: "Voz",
+  revision_audio: "Revisión de audio",
+  assets: "Imágenes",
+  callouts: "Rótulos",
+  render: "Vídeo",
+  repaso: "Repaso",
+  encargo: "Encargo",
+}
+
+const PANELES: Record<Exclude<IdPantalla, "encargo">,
+  (p: PropsPanel) => JSX.Element> = {
   ingesta: PanelIngesta,
   brief: PanelBrief,
   guion: PanelGuion,
@@ -65,6 +84,25 @@ const PANELES: Record<IdPantalla, (p: PropsPanel) => JSX.Element> = {
   render: PanelRender,
   repaso: PanelRepaso,
 }
+
+/** Las cinco paradas: el pipeline contado para móvil. Cada una cubre
+ * varias pantallas; la que no se puede pisar se APAGA con su motivo,
+ * no se esconde. */
+const PARADAS: {
+  id: string
+  nombre: string
+  cubre: IdPantalla[]
+  destino: IdPantalla
+}[] = [
+  { id: "encargo", nombre: "Encargo", cubre: ["encargo", "ingesta", "brief"],
+    destino: "encargo" },
+  { id: "guion", nombre: "Guion",
+    cubre: ["guion", "voz", "revision_audio"], destino: "guion" },
+  { id: "imagenes", nombre: "Imágenes", cubre: ["assets", "callouts"],
+    destino: "assets" },
+  { id: "video", nombre: "Vídeo", cubre: ["render"], destino: "render" },
+  { id: "repaso", nombre: "Repaso", cubre: ["repaso"], destino: "repaso" },
+]
 
 export default function Proyecto() {
   const { pid = "" } = useParams()
@@ -199,12 +237,13 @@ export default function Proyecto() {
     [cargar_pasos, cargar_ficha, cargar_proyecto, paso]
   )
 
-  const ejecutar = async (unidades?: string[]) => {
+  const ejecutar = async (unidades?: string[], paso_id?: IdPantalla) => {
+    const destino = paso_id ?? paso
     const cuerpo: Record<string, unknown> = {}
     if (unidades && unidades.length > 0) cuerpo.unidades = unidades
     try {
       const trabajo = await api.post<TrabajoFicha>(
-        `/api/proyectos/${pid}/pasos/${paso}/ejecutar`,
+        `/api/proyectos/${pid}/pasos/${destino}/ejecutar`,
         cuerpo
       )
       setTid(trabajo.id)
@@ -280,11 +319,36 @@ export default function Proyecto() {
     (estado_trabajo === "en_cola" || estado_trabajo === "ejecutando")
   const resumen_actual = pasos.pasos[paso]
   const guion_aprobado = pasos.pasos.guion?.aprobado ?? false
-  const Panel = PANELES[paso]
+  const Panel = paso === "encargo" ? null : PANELES[paso]
   const coste_proyecto = proyecto.coste ?? 0
 
+  /** cada parada sabe si se puede pisar y, si no, por qué (se APAGA
+   * con su motivo, no se esconde) */
+  const puede_parada = (id: string): { puede: boolean; porque: string } => {
+    switch (id) {
+      case "encargo":
+        return { puede: true, porque: "" }
+      case "guion":
+        return pasos.pasos.ingesta?.estado !== "vacio"
+          ? { puede: true, porque: "" }
+          : { puede: false, porque: "procesa el material primero (parada Encargo)" }
+      case "imagenes":
+        return guion_aprobado
+          ? { puede: true, porque: "" }
+          : { puede: false, porque: "aprueba el guion primero (parada Guion): cada imagen cuesta dinero" }
+      case "video":
+        return pasos.pasos.assets?.estado !== "vacio"
+          ? { puede: true, porque: "" }
+          : { puede: false, porque: "genera las imágenes primero (parada Imágenes)" }
+      default:
+        return pasos.pasos.render?.estado !== "vacio"
+          ? { puede: true, porque: "" }
+          : { puede: false, porque: "monta el vídeo primero (parada Vídeo)" }
+    }
+  }
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 pb-14 lg:pb-0">
       {/* cabecera del proyecto */}
       <div className="flex flex-wrap items-center gap-3">
         <Boton
@@ -316,6 +380,14 @@ export default function Proyecto() {
           </p>
         </div>
         <div className="ml-auto flex gap-2">
+          <Boton
+            variante={paso === "encargo" ? "defecto" : "contorno"}
+            tamano="pequeno"
+            title="El vídeo en una pantalla: material, tono y largo, con autoguardado"
+            onClick={() => setPaso(paso === "encargo" ? "ingesta" : "encargo")}
+          >
+            <ClipboardList /> Encargo
+          </Boton>
           <Boton
             variante="contorno"
             tamano="pequeno"
@@ -404,15 +476,17 @@ export default function Proyecto() {
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">
-              {NOMBRES_PASOS[paso]}
-              {paso !== "repaso" && ficha.version > 0 && (
+              {NOMBRE_PANTALLA[paso]}
+              {paso !== "repaso" && paso !== "encargo" && ficha.version > 0 && (
                 <span className="ml-2 text-sm font-normal text-muted-foreground">
                   v{ficha.version}
                 </span>
               )}
             </h2>
-            {paso !== "repaso" && <PildoraEstado estado={ficha.estado} />}
-            {paso !== "repaso" && (
+            {paso !== "repaso" && paso !== "encargo" && (
+              <PildoraEstado estado={ficha.estado} />
+            )}
+            {paso !== "repaso" && paso !== "encargo" && (
               <div className="ml-auto flex flex-wrap items-center gap-2">
                 <Estimacion pid={pid} paso={paso} />
                 <EditorParams
@@ -433,7 +507,7 @@ export default function Proyecto() {
             )}
           </div>
 
-          {paso !== "ingesta" && paso !== "repaso" && (
+          {paso !== "ingesta" && paso !== "repaso" && paso !== "encargo" && (
             <div className="flex flex-wrap items-center gap-3">
               <Boton
                 onClick={() => ejecutar()}
@@ -460,19 +534,37 @@ export default function Proyecto() {
             </div>
           )}
 
-          <Panel
-            pid={pid}
-            ficha={ficha}
-            ocupado={ocupado}
-            alEjecutar={ejecutar}
-            seguirTrabajo={(nuevo_tid) => {
-              setTid(nuevo_tid)
-              setEstadoTrabajo("en_cola")
-            }}
-            recargar={() => recargar_todo(paso)}
-          />
+          {paso === "encargo" ? (
+            <PanelEncargo
+              pid={pid}
+              ocupado={ocupado}
+              params={{
+                ingesta: pasos.pasos.ingesta?.params ?? {},
+                brief: pasos.pasos.brief?.params ?? {},
+                guion: pasos.pasos.guion?.params ?? {},
+              }}
+              material_listo={pasos.pasos.ingesta?.estado !== "vacio"}
+              guion_vacio={pasos.pasos.guion?.estado === "vacio"}
+              alEjecutarGuion={() => ejecutar(undefined, "guion")}
+              alGuardar={() => {
+                cargar_pasos()
+              }}
+            />
+          ) : Panel ? (
+            <Panel
+              pid={pid}
+              ficha={ficha}
+              ocupado={ocupado}
+              alEjecutar={ejecutar}
+              seguirTrabajo={(nuevo_tid) => {
+                setTid(nuevo_tid)
+                setEstadoTrabajo("en_cola")
+              }}
+              recargar={() => recargar_todo(paso)}
+            />
+          ) : null}
 
-          {paso !== "repaso" && (
+          {paso !== "repaso" && paso !== "encargo" && (
             <CajaFeedback
               pid={pid}
               paso={paso}
@@ -520,6 +612,40 @@ export default function Proyecto() {
         abierto={visor_abierto}
         alCerrar={() => setVisorAbierto(false)}
       />
+
+      {/* las cinco paradas, solo en móvil: el pipeline de bolsillo */}
+      <nav
+        aria-label="Paradas del vídeo"
+        className="fixed inset-x-0 bottom-0 z-30 border-t bg-card/95 backdrop-blur lg:hidden"
+      >
+        <div className="mx-auto flex max-w-7xl items-stretch">
+          {PARADAS.map((parada) => {
+            const { puede, porque } = puede_parada(parada.id)
+            const activa = parada.cubre.includes(paso)
+            return (
+              <button
+                key={parada.id}
+                disabled={!puede}
+                onClick={() => setPaso(parada.destino)}
+                aria-current={activa ? "page" : undefined}
+                title={puede ? parada.nombre : porque}
+                className={`flex flex-1 flex-col items-center gap-0.5 px-1 py-2 text-[11px] transition-colors ${
+                  activa
+                    ? "font-semibold text-primary"
+                    : "text-muted-foreground hover:text-foreground"
+                } ${!puede ? "cursor-not-allowed opacity-40" : ""}`}
+              >
+                {parada.nombre}
+                <span
+                  className={`h-0.5 w-6 rounded-full ${
+                    activa ? "bg-primary" : "bg-transparent"
+                  }`}
+                />
+              </button>
+            )
+          })}
+        </div>
+      </nav>
     </div>
   )
 }

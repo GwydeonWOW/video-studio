@@ -28,6 +28,9 @@ ROLES = ("guion", "correccion", "titulos", "descripcion",
          "catalogo", "conservacion", "guia_estilo", "asistente")
 ROL_INVALIDO = ("rol desconocido; roles: " + ", ".join(ROLES))
 
+# ajustes que acepta PUT /api/ajustes (lo demás tiene su ruta propia)
+PERMITIDOS = ("onboarding_visto",)
+
 
 # ------------------------------------------------------------------- salud
 
@@ -72,7 +75,28 @@ def proveedores() -> dict:
 
 @router.get("/ajustes", dependencies=[_SESION])
 def ajustes() -> dict:
-    return _ajustes_guardados()
+    return _ajustes_publicos()
+
+
+@router.put("/ajustes", dependencies=_MUTAR)
+def poner_ajustes(cuerpo: dict) -> dict:
+    """Ajustes generales del servicio, con lista blanca (lo demás tiene su
+    propia ruta: modelos en /ajustes/llm, tarifas en /coste/tarifas)."""
+    nuevos = cuerpo or {}
+    if not isinstance(nuevos, dict):
+        raise HTTPException(400, "se esperaba {ajuste: valor}")
+    if "onboarding_visto" in nuevos and not isinstance(
+            nuevos["onboarding_visto"], bool):
+        raise HTTPException(400, "onboarding_visto debe ser true o false")
+    desconocidas = sorted(set(nuevos) - set(PERMITIDOS))
+    if desconocidas:
+        raise HTTPException(400, "ajuste desconocido: " + ", ".join(desconocidas))
+    datos = _ajustes_guardados()
+    for clave in PERMITIDOS:
+        if clave in nuevos:
+            datos[clave] = nuevos[clave]
+    _guardar_ajustes(datos)
+    return _ajustes_publicos()
 
 
 @router.put("/ajustes/llm", dependencies=_MUTAR)
@@ -98,13 +122,24 @@ def poner_ajustes_llm(cuerpo: dict) -> dict:
         limpios[rol] = {"proveedor": proveedor, "modelo": modelo}
     datos["llm"] = limpios
     _guardar_ajustes(datos)
-    return datos
+    return _ajustes_publicos()
 
 
 def _ajustes_guardados() -> dict:
     datos = leer_json(Path(AJUSTES.datos) / "ajustes.json", {}) or {}
     if not isinstance(datos, dict):
         return {}
+    return datos
+
+
+def _ajustes_publicos() -> dict:
+    """Lo que ve la UI: los guardados con los ajustes de obra normalizados.
+
+    `onboarding_visto` no está en el fichero hasta que alguien cierra la
+    guía: ausente es «aún no la ha visto», no «ya la vio».
+    """
+    datos = dict(_ajustes_guardados())
+    datos.setdefault("onboarding_visto", False)
     return datos
 
 
