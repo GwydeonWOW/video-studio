@@ -161,6 +161,17 @@ def crear(cuerpo: dict) -> dict:
 # OJO al orden: estas rutas van ANTES que /{pid} para que "papelera" no se
 # trague el parametro de ruta.
 
+def _camino_papelera(carpeta: str):
+    """Resuelve una carpeta de la papelera RECHAZANDO nombres que salgan
+    de ella (`..`, rutas absolutas...): un borrado definitivo jamás puede
+    tocar nada que no esté dentro de la papelera."""
+    papelera = (AJUSTES.datos / "papelera").resolve()
+    origen = (papelera / carpeta).resolve()
+    if origen.parent != papelera:
+        raise HTTPException(400, "nombre de carpeta no válido")
+    return origen
+
+
 @router.get("/papelera", dependencies=[_SESION])
 def listar_papelera() -> list[dict]:
     papelera = AJUSTES.datos / "papelera"
@@ -179,7 +190,7 @@ def listar_papelera() -> list[dict]:
 
 @router.post("/papelera/{carpeta}/restaurar", status_code=201, dependencies=_MUTAR)
 def restaurar(carpeta: str) -> dict:
-    origen = AJUSTES.datos / "papelera" / carpeta
+    origen = _camino_papelera(carpeta)
     if not origen.is_dir():
         raise HTTPException(404, "no está en la papelera")
     ficha = leer_json(origen / "proyecto.json", {}) or {}
@@ -196,7 +207,7 @@ def restaurar(carpeta: str) -> dict:
 
 @router.delete("/papelera/{carpeta}", status_code=204, dependencies=_MUTAR)
 def borrar_definitivo(carpeta: str):
-    origen = AJUSTES.datos / "papelera" / carpeta
+    origen = _camino_papelera(carpeta)
     if not origen.is_dir():
         raise HTTPException(404, "no está en la papelera")
     shutil.rmtree(origen)
@@ -216,7 +227,7 @@ def vaciar_papelera():
 @router.get("/papelera/{carpeta}", dependencies=[_SESION])
 def dentro_de_papelera(carpeta: str) -> dict:
     """Qué hay dentro de un proyecto apartado, para poder decir qué se pierde."""
-    origen = AJUSTES.datos / "papelera" / carpeta
+    origen = _camino_papelera(carpeta)
     if not origen.is_dir():
         raise HTTPException(404, "no está en la papelera")
     ficha = leer_json(origen / "proyecto.json", {}) or {}
@@ -897,7 +908,8 @@ def poner_presupuesto(pid: str, cuerpo: dict) -> dict:
         except (TypeError, ValueError):
             raise HTTPException(400, "el presupuesto debe ser un número "
                                      "(o null para quitarlo)") from None
-        if valor < 0 or valor > 10000:
+        if valor != valor or not (0 <= valor <= 10000):
+            # `valor != valor` caza NaN (pasa cualquier comparación < >)
             raise HTTPException(400, "el presupuesto debe estar entre 0 y "
                                      "10000 dólares")
     with lock_de(pid):
