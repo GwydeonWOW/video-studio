@@ -431,6 +431,101 @@ export interface EstiloCanal {
   actualizado: string
 }
 
+/* ---------- repaso, capturas y montaje (Fase D) ---------- */
+
+/** Una nota del repaso, anclada al segundo (GET/POST /{pid}/repaso). */
+export interface NotaRepaso {
+  id: string
+  t: number
+  plano: string
+  texto: string
+  imagenes: string[]
+  fecha: string
+  estado: "pendiente" | "aplicado"
+  ancla?: string
+  regenerado?: string
+  reanclada?: string | boolean
+  descolgada?: boolean
+  aplicada?: string
+}
+
+/** Corte de escena del vídeo montado (contra lo que se anclan las notas). */
+export interface CorteRepaso {
+  id: string
+  t_in: number
+  t_out: number
+  narracion: string
+}
+
+/** El vocabulario del enrutador: ámbitos y cambios con su coste. */
+export interface CatalogoRepaso {
+  ambitos: Record<string, { que_es: string; cuesta: string }>
+  cambios: Record<
+    string,
+    { ambito: string; que_es: string; rehacer: string[]; campos: string[]; destino: string[] }
+  >
+}
+
+/** Ficha completa del repaso (GET /{pid}/repaso). */
+export interface FichaRepaso {
+  notas: NotaRepaso[]
+  pendientes: number
+  cortes: CorteRepaso[]
+  duracion: number
+  montado: boolean
+  video: string | null
+  version_video?: number | null
+  catalogo: CatalogoRepaso
+  pipeline: string
+  activo: TrabajoFicha | null
+}
+
+/** Nota ya repartida por el enrutador (respuesta del trabajo «repaso»). */
+export interface NotaEnrutada {
+  id: string
+  texto: string
+  entendido: string
+  ambito: string
+  cambios: { tipo: string; ambito: string; plano?: string; texto?: string; valor?: unknown }[]
+}
+
+/** Un cambio validado del vocabulario cerrado. */
+export interface CambioRepaso {
+  tipo: string
+  ambito: string
+  plano?: string
+  texto?: string
+  valor?: string | number
+  alcance?: string
+  campos_cartela?: Record<string, string>
+  rehacer: string[]
+}
+
+/** Una captura anotada del reproductor (GET/POST /{pid}/capturas). */
+export interface FichaCaptura {
+  id: string
+  paso: "callouts" | "render"
+  escena: string
+  unidad: string
+  t_video: number | null
+  t_escena: number | null
+  imagen: string
+  url?: string
+  trazos: { color: string; grosor: number; puntos: { x: number; y: number }[] }[]
+  comentario: string
+  creada: string
+  aplicada: string | null
+  trabajo: string | null
+  bytes: number
+  contexto?: Record<string, unknown>
+}
+
+/** Notas libres del montaje (GET/PUT /{pid}/montaje/notas). */
+export interface NotasMontaje {
+  texto: string
+  actualizado?: string
+}
+
 export interface Escena {
   id: string
   titulo?: string
@@ -457,6 +552,8 @@ export const NOMBRES_PASOS: Record<string, string> = {
   direccion: "Dirección",
   redactor: "Redactor",
   cartelas: "Cartelas",
+  repaso: "Repaso",
+  capturas: "Capturas",
 }
 
 export const ORDEN_PASOS: IdPaso[] = [

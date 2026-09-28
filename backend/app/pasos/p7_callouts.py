@@ -44,11 +44,19 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     vinetas = []
     palabras_de = {p["id"]: p.get("palabras", []) for p in voz["escenas"]}
     duracion_de = {p["id"]: p["duracion"] for p in voz["escenas"]}
+    unidades = params.get("unidades") or {}
     for escena in guion["escenas"]:
         palabras = palabras_de.get(escena["id"], [])
         # resumen de marcas: primer/ultimo tercio, sin volcar todo
         marcas = ([(w["palabra"], w["inicio"], w["fin"]) for w in palabras]
                   [:60])
+        ficha_u = unidades.get(escena["id"]) or {}
+        # LO CORREGIDO A MANO VA CON LA VIÑETA: el historial de feedback
+        # de la escena (capturas, repaso) es lo que este rótulo ya hizo
+        # mal; sin él, re-decidir repetiría el error.
+        correcciones = [" ".join(str(n.get("texto") or "").split())
+                        for n in (ficha_u.get("feedback") or [])
+                        if isinstance(n, dict) and n.get("texto")]
         vinetas.append({
             "id": escena["id"],
             "titulo": escena.get("titulo", ""),
@@ -56,6 +64,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
             "propuesta": escena.get("texto_pantalla", ""),
             "duracion": duracion_de.get(escena["id"], 0),
             "palabras": marcas,
+            **({"correcciones": correcciones} if correcciones else {}),
         })
     llamada = llm.rol_config("titulos", comun.ajustes_llm())
     llamada.sistema = SISTEMA
@@ -72,6 +81,13 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
         texto = comun.normalizar_texto(item.get("texto", ""))[:60]
         if not texto:
             continue
+        # EL TEXTO CORREGIDO A MANO MANDA: el repaso guarda por unidad lo
+        # que el rótulo debe decir (`subtitulo_texto`) y se aplica
+        # DESPUÉS del modelo, conservando la ventana que la voz dictó.
+        manual = " ".join(str((unidades.get(escena_id) or {})
+                              .get("subtitulo_texto") or "").split())
+        if manual:
+            texto = manual[:60]
         try:
             aparece = max(0.0, float(item.get("aparece", 0.0)))
         except (TypeError, ValueError):
@@ -82,6 +98,20 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
         rotulos.append({"id": escena_id, "texto": texto,
                         "aparece": round(aparece, 2),
                         "dura": duracion_max})
+    # una escena SIN propuesta pero CON texto corregido a mano también
+    # lleva rótulo: la corrección no puede depender de que el modelo la
+    # proponga otra vez
+    con_manual = {sid for sid, ficha in unidades.items()
+                  if isinstance(ficha, dict) and ficha.get("subtitulo_texto")}
+    for sid in sorted(con_manual):
+        if any(r["id"] == sid for r in rotulos):
+            continue
+        manual = " ".join(str(unidades[sid].get("subtitulo_texto") or "").split())
+        if not manual or sid not in duracion_de:
+            continue
+        rotulos.append({"id": sid, "texto": manual[:60],
+                        "aparece": 0.0, "dura": duracion_max})
+    rotulos.sort(key=lambda r: r["id"])
     trabajo.avance(f"{len(rotulos)} rotulos colocados")
     # El grafismo usado queda ESCRITO en los datos: el render no relee
     # params (los suyos son de otro paso), y una vista vieja tiene que

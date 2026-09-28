@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
-import { ArrowLeft, BookOpen, ChevronLeft, ChevronRight, ClipboardCopy, Eye, Loader2, MessageSquareHeart, Palette, Pause, Play, Settings2, Wallet, Zap } from "lucide-react"
+import { ArrowLeft, BookOpen, Camera, ChevronLeft, ChevronRight, ClipboardCopy, Eye, Loader2, MessageSquareHeart, Palette, Pause, Play, Settings2, Wallet, Zap } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares, segundos } from "../lib/utils"
 import {
@@ -34,6 +34,7 @@ import {
   DescripcionDialogo,
 } from "../components/ui/dialogo"
 import { BarraTrabajo } from "../components/barra_trabajo"
+import { DialogoCaptura } from "./proyecto/repaso"
 import { EditorParams, Estimacion, PildoraEstado, ZonaVersiones } from "./proyecto/piezas"
 import {
   PanelAssets,
@@ -46,8 +47,13 @@ import {
   PanelVoz,
   type PropsPanel,
 } from "./proyecto/paneles"
+import { PanelRepaso } from "./proyecto/repaso"
 
-const PANELES: Record<IdPaso, (p: PropsPanel) => JSX.Element> = {
+/** el pipeline + la pantalla de repaso (que vive sobre el montado) */
+type IdPantalla = IdPaso | "repaso"
+const PANTALLAS: IdPantalla[] = [...ORDEN_PASOS, "repaso"]
+
+const PANELES: Record<IdPantalla, (p: PropsPanel) => JSX.Element> = {
   ingesta: PanelIngesta,
   brief: PanelBrief,
   guion: PanelGuion,
@@ -56,6 +62,7 @@ const PANELES: Record<IdPaso, (p: PropsPanel) => JSX.Element> = {
   assets: PanelAssets,
   callouts: PanelCallouts,
   render: PanelRender,
+  repaso: PanelRepaso,
 }
 
 export default function Proyecto() {
@@ -63,7 +70,7 @@ export default function Proyecto() {
   const navegar = useNavigate()
   const [proyecto, setProyecto] = useState<FichaProyecto | null>(null)
   const [pasos, setPasos] = useState<FichaPasos | null>(null)
-  const [paso, setPaso] = useState<IdPaso>("ingesta")
+  const [paso, setPaso] = useState<IdPantalla>("ingesta")
   const [ficha, setFicha] = useState<FichaPaso | null>(null)
   const [tid, setTid] = useState<string | null>(null)
   const [estado_trabajo, setEstadoTrabajo] = useState<string | null>(null)
@@ -95,7 +102,7 @@ export default function Proyecto() {
   }, [pid])
 
   const cargar_ficha = useCallback(
-    async (paso_id: string, base: FichaPasos | null = null) => {
+    async (paso_id: IdPantalla, base: FichaPasos | null = null) => {
       const fuente = base ?? pasos
       const resumen = fuente?.pasos[paso_id]
       if (!resumen || resumen.estado === "vacio") {
@@ -178,7 +185,7 @@ export default function Proyecto() {
   /* ---------------------------------------------------------- acciones */
 
   const recargar_todo = useCallback(
-    async (paso_id?: string) => {
+    async (paso_id?: IdPantalla) => {
       await cargar_pasos()
       await cargar_ficha(paso_id ?? paso, null)
       cargar_proyecto()
@@ -210,9 +217,12 @@ export default function Proyecto() {
         toast.error(final.error || "el trabajo falló")
       else if (final.estado === "cancelado") toast("trabajo cancelado")
       cargar_coste()
-      recargar_todo(final.paso)
+      const destino = (PANTALLAS as string[]).includes(final.paso)
+        ? (final.paso as IdPantalla)
+        : paso
+      recargar_todo(destino)
     },
-    [recargar_todo, cargar_coste]
+    [recargar_todo, cargar_coste, paso]
   )
 
   const renombrar = async (nombre: string, canal: string, idioma: string) => {
@@ -346,7 +356,7 @@ export default function Proyecto() {
       <div className="grid items-start gap-6 lg:grid-cols-[230px_1fr]">
         {/* columna de pasos */}
         <nav className="flex gap-1 overflow-x-auto lg:sticky lg:top-20 lg:flex-col lg:overflow-visible">
-          {ORDEN_PASOS.map((id, i) => {
+          {PANTALLAS.map((id, i) => {
             const res = pasos.pasos[id]
             const obsoletas = res?.unidades_obsoletas?.length ?? 0
             const seleccionado = id === paso
@@ -389,33 +399,35 @@ export default function Proyecto() {
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold">
               {NOMBRES_PASOS[paso]}
-              {ficha.version > 0 && (
+              {paso !== "repaso" && ficha.version > 0 && (
                 <span className="ml-2 text-sm font-normal text-muted-foreground">
                   v{ficha.version}
                 </span>
               )}
             </h2>
-            <PildoraEstado estado={ficha.estado} />
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-              <Estimacion pid={pid} paso={paso} />
-              <EditorParams
-                pid={pid}
-                paso={paso}
-                params={ficha.params ?? {}}
-                alGuardar={() => recargar_todo(paso)}
-              />
-              {ficha.estado !== "vacio" && (
-                <ZonaVersiones
+            {paso !== "repaso" && <PildoraEstado estado={ficha.estado} />}
+            {paso !== "repaso" && (
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                <Estimacion pid={pid} paso={paso} />
+                <EditorParams
                   pid={pid}
                   paso={paso}
-                  version={ficha.version}
-                  alRevertir={() => recargar_todo(paso)}
+                  params={ficha.params ?? {}}
+                  alGuardar={() => recargar_todo(paso)}
                 />
-              )}
-            </div>
+                {ficha.estado !== "vacio" && (
+                  <ZonaVersiones
+                    pid={pid}
+                    paso={paso}
+                    version={ficha.version}
+                    alRevertir={() => recargar_todo(paso)}
+                  />
+                )}
+              </div>
+            )}
           </div>
 
-          {paso !== "ingesta" && (
+          {paso !== "ingesta" && paso !== "repaso" && (
             <div className="flex flex-wrap items-center gap-3">
               <Boton
                 onClick={() => ejecutar()}
@@ -454,9 +466,10 @@ export default function Proyecto() {
             recargar={() => recargar_todo(paso)}
           />
 
-          <CajaFeedback
-            pid={pid}
-            paso={paso}
+          {paso !== "repaso" && (
+            <CajaFeedback
+              pid={pid}
+              paso={paso}
             ficha={ficha}
             ocupado={ocupado}
             alSeguir={(nuevo_tid) => {
@@ -465,6 +478,7 @@ export default function Proyecto() {
             }}
             alAnotar={() => recargar_todo(paso)}
           />
+          )}
         </div>
       </div>
 
@@ -1174,7 +1188,9 @@ function DialogoVisor({
   const [indice, setIndice] = useState(0)
   const [seguido, setSeguido] = useState(false)
   const [t_audio, setTAudio] = useState(0)
+  const [captura_abierta, setCapturaAbierta] = useState(false)
   const audio_ref = useRef<HTMLAudioElement | null>(null)
+  const img_ref = useRef<HTMLImageElement | null>(null)
 
   useEffect(() => {
     if (!abierto) return
@@ -1225,6 +1241,46 @@ function DialogoVisor({
     t_audio >= escena.rotulo.aparece &&
     t_audio < escena.rotulo.aparece + escena.rotulo.dura
 
+  /** Compone el fotograma de la previsualización: imagen + rótulo tal
+   * como se ven (la captura es de lo que se está MIRANDO). */
+  const componer_fotograma = (): HTMLCanvasElement | null => {
+    const img = img_ref.current
+    if (!img || !img.naturalWidth) return null
+    const lienzo = document.createElement("canvas")
+    lienzo.width = 1280
+    lienzo.height = 720
+    const ctx = lienzo.getContext("2d")!
+    ctx.fillStyle = "#000"
+    ctx.fillRect(0, 0, 1280, 720)
+    const escala = Math.min(1280 / img.naturalWidth, 720 / img.naturalHeight)
+    const w = img.naturalWidth * escala
+    const h = img.naturalHeight * escala
+    ctx.drawImage(img, (1280 - w) / 2, (720 - h) / 2, w, h)
+    if (rotulo_visible && escena?.rotulo) {
+      const texto = escena.rotulo.texto
+      ctx.font = "600 44px system-ui, sans-serif"
+      const metrica = ctx.measureText(texto)
+      const ancho = metrica.width + 56
+      const alto = 72
+      const x = (1280 - ancho) / 2
+      const y = 720 - 160
+      ctx.fillStyle = "rgba(0,0,0,0.75)"
+      ctx.beginPath()
+      ctx.roundRect(x, y, ancho, alto, 18)
+      ctx.fill()
+      ctx.fillStyle = "#fff"
+      ctx.textBaseline = "middle"
+      ctx.fillText(texto, x + 28, y + alto / 2 + 2)
+    }
+    ctx.fillStyle = "rgba(0,0,0,0.6)"
+    ctx.fillRect(0, 0, 220, 34)
+    ctx.fillStyle = "#fff"
+    ctx.font = "500 20px system-ui, sans-serif"
+    ctx.textBaseline = "middle"
+    ctx.fillText(`${indice + 1}/${datos?.escenas.length ?? 1} · ${escena?.id ?? ""}`, 12, 18)
+    return lienzo
+  }
+
   return (
     <Dialogo abierto={abierto} alCambiar={(a) => (a ? null : alCerrar())}>
       <ContenidoDialogo className="max-w-3xl">
@@ -1248,6 +1304,7 @@ function DialogoVisor({
             >
               {escena.imagen ? (
                 <img
+                  ref={img_ref}
                   src={`/a/${pid}/${escena.imagen}`}
                   alt={escena.titulo || escena.id}
                   className="h-full w-full object-contain"
@@ -1316,6 +1373,14 @@ function DialogoVisor({
                 {segundos(escena.duracion)} · total {segundos(datos.duracion)}
                 {datos.montado && " · MP4 listo"}
               </span>
+              <Boton
+                variante="contorno"
+                tamano="pequeno"
+                title="Congela este plano (con su rótulo tal como se ve) y pinta encima"
+                onClick={() => setCapturaAbierta(true)}
+              >
+                <Camera /> Capturar
+              </Boton>
             </div>
 
             <div className="flex flex-wrap gap-1">
@@ -1337,6 +1402,16 @@ function DialogoVisor({
             <p className="text-sm text-muted-foreground">{escena.narracion}</p>
           </div>
         )}
+
+        <DialogoCaptura
+          pid={pid}
+          abierto={captura_abierta}
+          alCambiar={setCapturaAbierta}
+          paso="callouts"
+          escena={escena?.id ?? ""}
+          componer={componer_fotograma}
+          t_escena={t_audio}
+        />
       </ContenidoDialogo>
     </Dialogo>
   )

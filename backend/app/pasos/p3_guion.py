@@ -66,13 +66,25 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     escenas = respuesta.get("escenas") if isinstance(respuesta, dict) else respuesta
     if not isinstance(escenas, list) or not escenas:
         raise llm.ErrorLLM("el guion no trae escenas")
+    # LO ESCRITO A MANO MANDA: el repaso guarda por unidad la narración
+    # corregida (`params.unidades[SXXX].texto`, cajón que nadie más
+    # toca) y aquí se aplica DESPUÉS del modelo — es el cajón vivo del
+    # cambio `escena_texto` del repaso, y sin releerlo la corrección se
+    # marcaría como aplicada y el vídeo seguiría diciendo lo mismo.
+    override = {str(k): v for k, v in
+                ((params.get("unidades") or {}).items())
+                if isinstance(v, dict) and v.get("texto")}
     salida = []
     for indice, escena in enumerate(escenas, start=1):
         narracion = comun.normalizar_texto(escena.get("narracion", ""))
         if not narracion:
             continue
+        sid = comun.limpiar_id(escena.get("id", f"S{indice}"))
+        manual = " ".join(str(override.get(sid, {}).get("texto") or "").split())
+        if manual:
+            narracion = manual
         salida.append({
-            "id": comun.limpiar_id(escena.get("id", f"S{indice}")),
+            "id": sid,
             "titulo": comun.normalizar_texto(escena.get("titulo", ""))[:120],
             "narracion": narracion,
             "visual": comun.normalizar_texto(escena.get("visual", ""))[:600],

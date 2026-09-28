@@ -16,21 +16,23 @@ import shutil
 import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from .. import seguridad
 from ..config import AJUSTES
+from ..nucleo import capturas
 from ..nucleo import estilo
 from ..nucleo import coste as nucleo_coste
 from ..nucleo import grafismo
 from ..nucleo.coste import de_proyecto
 from ..nucleo.estado import GRAFO, Estado, descendientes_de
 from ..nucleo import recetas
-from ..nucleo.proyecto import (Proyecto, ahora, id_valido, leer_json,
-                               leer_jsonl, lock_de)
+from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
+                               leer_json, leer_jsonl, lock_de,
+                               ruta_contenida)
 from ..nucleo.trabajos import TrabajoCancelado
-from ..pasos import (cartelas, direccion, p2_brief, p3_guion, p4_voz,
-                     p6_assets, redactor, registro)
+from ..pasos import (cartelas, comun, direccion, p2_brief, p3_guion, p4_voz,
+                     p6_assets, redactor, registro, repaso)
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
@@ -111,6 +113,15 @@ def _fusionar_unidades(previo: dict, nuevo: dict, unidades: list[str]) -> dict:
     for clave, valor in nuevo.items():
         if clave not in _CAMPOS_UNIDADES:
             mezcla[clave] = valor
+    # PERO la duración total de una lista de escenas no es un escalar
+    # cualquiera: una corrida parcial (regrabar UNA escena) trae la suma
+    # de sólo las suyas, y dejarla pasar acortaría el vídeo
+    if isinstance(mezcla.get("escenas"), list):
+        con_duracion = [u for u in mezcla["escenas"]
+                        if isinstance(u, dict) and "duracion" in u]
+        if con_duracion:
+            mezcla["duracion"] = round(
+                sum(float(u.get("duracion") or 0.0) for u in con_duracion), 3)
     return mezcla
 
 
@@ -640,7 +651,8 @@ def _correr(proyecto: Proyecto, paso: str, params: dict, unidades: list[str]):
     def funcion(trabajo):
         modulo = registro.modulo_de(paso)
         trabajo.avance(f"ejecutando {paso}")
-        kwargs = {"solo_escenas": unidades} if paso == "assets" and unidades else {}
+        kwargs = ({"solo_escenas": unidades}
+                  if paso in ("assets", "voz") and unidades else {})
         datos = modulo.ejecutar(proyecto, params, trabajo, **kwargs)
         if unidades:
             datos = _fusionar_unidades(estado.datos_de(paso) or {}, datos, unidades)
@@ -1513,3 +1525,540 @@ def vista_callout(pid: str, plano: str, diseno: str | None = None,
         tam or datos.get("subtitulo_tam")
         or params.get("subtitulo_tam", "normal"))
     return Response(content=svg, media_type="image/svg+xml")
+
+
+# ===================================================================== #
+# EL REPASO                                                             #
+# ===================================================================== #
+#
+# Las notas se escriben MIRANDO el vídeo: ancladas al segundo, con el
+# plano que estaba en pantalla deducido de los cortes con los que se
+# montó ESE vídeo. Las notas viven en repaso.json (NO en params:
+# comentar un vídeo no lo deja obsoleto) y se convierten en cambios —
+# vocabulario cerrado, cada cambio con su coste — sólo al APLICAR.
+# Ver pasos/repaso.py para las tres decisiones que lo gobiernan.
+
+def _tiempos_de(proyecto: Proyecto) -> list[dict]:
+    """Los cortes del vídeo ACTUAL: escena a escena, con sus instantes.
+
+    Se arma con la voz (las duraciones reales) y el guion (lo que se
+    dice): es contra lo que se ancla una nota y contra lo que se
+    re-anclan las viejas.
+    """
+    guion = p2_brief.proyecto_leer_datos(proyecto, "guion") or {}
+    voz = p2_brief.proyecto_leer_datos(proyecto, "voz") or {}
+    narracion_de = {str(e.get("id")): str(e.get("narracion", ""))
+                    for e in guion.get("escenas", []) if isinstance(e, dict)}
+    cortes, t = [], 0.0
+    for escena in voz.get("escenas", []):
+        if not isinstance(escena, dict):
+            continue
+        sid = str(escena.get("id") or "")
+        try:
+            dur = float(escena.get("duracion") or 0.0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        cortes.append({"id": sid, "t_in": round(t, 3),
+                       "t_out": round(t + dur, 3),
+                       "narracion": narracion_de.get(sid, "")})
+        t += dur
+    return cortes
+
+
+def _planos_del_repaso(proyecto: Proyecto) -> dict:
+    """{plano: {cartela, texto_rotulo}} — el contexto de cada nota."""
+    assets = p2_brief.proyecto_leer_datos(proyecto, "assets") or {}
+    callouts = p2_brief.proyecto_leer_datos(proyecto, "callouts") or {}
+    cartela_de = {str(p.get("escena")): p.get("cartela")
+                  for p in assets.get("planos", []) if isinstance(p, dict)}
+    rotulo_de = {str(r.get("id")): r.get("texto")
+                 for r in callouts.get("rotulos", []) if isinstance(r, dict)}
+    return {sid: {"cartela": cartela_de.get(sid) or {},
+                  "texto_rotulo": rotulo_de.get(sid) or ""}
+            for sid in set(cartela_de) | set(rotulo_de)}
+
+
+def _ficha_repaso(proyecto: Proyecto) -> dict:
+    """Todo lo que pinta la pantalla del repaso."""
+    estado = Estado(proyecto)
+    ficha = repaso.leer(proyecto)
+    cortes = _tiempos_de(proyecto)
+    notas = repaso.reanclar(ficha["notas"], cortes)
+    montado = proyecto.ruta("pasos/render/final.mp4").exists()
+    pipeline = " · ".join(f"{p}:{estado.estado_de(p)}"
+                          for p in GRAFO if estado.estado_de(p) != "vacio")
+    return {
+        "notas": notas,
+        "pendientes": sum(1 for n in notas if n.get("estado") != "aplicado"),
+        "cortes": cortes,
+        "duracion": round(sum(c["t_out"] - c["t_in"] for c in cortes), 2),
+        "montado": montado,
+        "video": (f"/a/{proyecto.id}/pasos/render/final.mp4"
+                  if montado else None),
+        "version_video": ficha.get("version_video"),
+        "catalogo": repaso.catalogo(),
+        "pipeline": pipeline or "todavía no hay nada generado",
+        "activo": GESTOR.activo_de(proyecto.id),
+    }
+
+
+@router.get("/{pid}/repaso", dependencies=[_SESION])
+def leer_repaso(pid: str) -> dict:
+    return _ficha_repaso(_proyecto_o_404(pid))
+
+
+@router.post("/{pid}/repaso", status_code=201, dependencies=_MUTAR)
+def anadir_nota(pid: str, cuerpo: dict) -> dict:
+    """Una nota nueva, anclada al segundo en que se escribió.
+
+    El plano se deduce del instante contra los cortes del vídeo actual, y
+    la nota se guarda con el ANCLA de lo que se estaba narrando: el
+    seguro contra que los planos se renumeren al regenerar.
+    """
+    proyecto = _proyecto_o_404(pid)
+    texto = str((cuerpo or {}).get("texto", "")).strip()
+    if not texto:
+        raise HTTPException(400, "una nota del repaso necesita texto")
+    try:
+        t = max(0.0, float((cuerpo or {}).get("t") or 0.0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "'t' debe ser el segundo del vídeo") from None
+    cortes = _tiempos_de(proyecto)
+    sid = str((cuerpo or {}).get("plano") or "").strip() \
+        or repaso.plano_en(cortes, t)
+    ancla = next((c.get("narracion") for c in cortes if c.get("id") == sid), "")
+    nota = repaso.anadir(proyecto, texto, t, plano=sid,
+                         imagenes=(cuerpo or {}).get("imagenes") or (),
+                         version_video=(cuerpo or {}).get("version_video"),
+                         ancla=ancla)
+    proyecto.bitacora("nota_anadida", {"id": nota["id"], "t": t,
+                                       "plano": sid})
+    return {"nota": nota, "plano": sid}
+
+
+@router.put("/{pid}/repaso/{nid}", dependencies=_MUTAR)
+def editar_nota(pid: str, nid: str, cuerpo: dict) -> dict:
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    try:
+        nota = repaso.editar(proyecto, nid,
+                             texto=cuerpo.get("texto"),
+                             t=cuerpo.get("t"),
+                             imagenes=cuerpo.get("imagenes"))
+    except KeyError:
+        raise HTTPException(404, f"no hay nota {nid}") from None
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    return {"nota": nota}
+
+
+@router.delete("/{pid}/repaso/{nid}", status_code=204, dependencies=_MUTAR)
+def borrar_nota(pid: str, nid: str):
+    proyecto = _proyecto_o_404(pid)
+    try:
+        repaso.borrar(proyecto, nid)
+    except KeyError:
+        raise HTTPException(404, f"no hay nota {nid}") from None
+
+
+@router.post("/{pid}/repaso/imagenes", status_code=201, dependencies=_MUTAR)
+def subir_imagen_repaso(pid: str, cuerpo: dict) -> dict:
+    """Una imagen de referencia para la nota (PNG, del portapapeles o no)."""
+    proyecto = _proyecto_o_404(pid)
+    try:
+        datos_png = capturas._validar_png((cuerpo or {}).get("imagen"))
+    except capturas.ErrorCaptura as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    carpeta = repaso.carpeta_imagenes(proyecto, crear=True)
+    numero, existentes = 1, {p.name for p in carpeta.glob("*.png")}
+    while f"ref_{numero:03d}.png" in existentes:
+        numero += 1
+    nombre = f"ref_{numero:03d}.png"
+    (carpeta / nombre).write_bytes(datos_png)
+    return {"nombre": nombre, "bytes": len(datos_png),
+            "url": f"/a/{proyecto.id}/repaso/{nombre}"}
+
+
+@router.get("/{pid}/repaso/imagenes/{nombre}", dependencies=[_SESION])
+def leer_imagen_repaso(pid: str, nombre: str) -> FileResponse:
+    proyecto = _proyecto_o_404(pid)
+    ruta = ruta_contenida(repaso.carpeta_imagenes(proyecto), nombre)
+    if not ruta.is_file():
+        raise HTTPException(404, "esa imagen no está en el repaso")
+    return FileResponse(ruta, media_type="image/png")
+
+
+# ------------------------------------------------------- aplicar el repaso
+
+def _nota_feedback(texto: str, alcance: str, numero: int) -> dict:
+    """La nota de feedback que viaja al cajón de la unidad (en INGLÉS al
+    modelo de imagen, con la etiqueta de alcance delante)."""
+    prefijo = ("LOCALIZED fix, keep the rest of the frame as is"
+               if alcance == "retoque" else "Replace the subject")
+    return {"id": f"C{numero:03d}", "fecha": ahora(), "origen": "repaso",
+            "alcance": alcance,
+            "texto": f"Correction: {prefijo}. {texto}"}
+
+
+def _aplicar_cambios(proyecto: Proyecto, cambios: list[dict],
+                     trabajo) -> dict:
+    """Escribe cada cambio en SU cajón y MARCA lo que hay que rehacer.
+
+    Nada de esto genera: los cajones quedan escritos, las unidades
+    quedan sucias, y quien corre los pasos es `_correr_repaso` — con el
+    coste ya anunciado por el resumen. Los cajones son los MISMOS que
+    leen los pasos (regla del original: un cajón que nadie lee es una
+    nota marcada como aplicada con el vídeo igual).
+    """
+    estado = Estado(proyecto)
+    extras: dict[str, dict] = {}          # paso -> params que cambiarán
+    unidades: dict[str, list[str]] = {}   # paso -> unidades tocadas
+    escenas_reescritas: dict[str, str] = {}  # sid -> narración nueva
+
+    def cajon_unidad(paso: str, sid: str, campo: str, valor):
+        params = estado.paso(paso).get("params") or {}
+        bloque = dict((params.get("unidades") or {}).get(sid) or {})
+        bloque[campo] = valor
+        extras.setdefault(paso, {}).setdefault("unidades", {})[sid] = bloque
+        unidades.setdefault(paso, []).append(sid)
+
+    for cambio in cambios:
+        tipo = cambio.get("tipo")
+        sid = str(cambio.get("plano") or "")
+        if tipo == "feedback_plano":
+            params = estado.paso("assets").get("params") or {}
+            bloque = dict((params.get("unidades") or {}).get(sid) or {})
+            historial = list(bloque.get("feedback") or [])
+            historial.append(_nota_feedback(cambio["texto"],
+                                            cambio.get("alcance", "sustituye"),
+                                            len(historial) + 1))
+            extras.setdefault("assets", {}).setdefault("unidades", {})[sid] = {
+                **bloque, "feedback": historial}
+            unidades.setdefault("assets", []).append(sid)
+        elif tipo == "cartela_texto":
+            params = estado.paso("assets").get("params") or {}
+            previa = (params.get("unidades") or {}).get(sid) or {}
+            cartela = dict(previa.get("cartela") or {})
+            if not cartela.get("plantilla"):
+                trabajo.avance(f"{sid}: no es cartela, su texto no se "
+                               "puede cambiar — se ignora")
+                continue
+            valores, motivos = cartelas.validar(
+                cartela.get("plantilla", ""),
+                {**(cartela.get("datos") or {}), **cambio["campos_cartela"]})
+            if valores is None:
+                trabajo.avance(f"{sid}: {'; '.join(motivos)} — se ignora")
+                continue
+            cartela["datos"] = valores
+            extras.setdefault("assets", {}).setdefault("unidades", {})[sid] = {
+                **dict(previa), "cartela": cartela}
+            unidades.setdefault("assets", []).append(sid)
+        elif tipo == "quitar_cartela":
+            cajon_unidad("assets", sid, "cartela", None)
+        elif tipo == "subtitulo_tam":
+            extras.setdefault("callouts", {})["subtitulo_tam"] = cambio["valor"]
+        elif tipo == "grafismo":
+            extras.setdefault("callouts", {})["diseno"] = cambio["valor"]
+        elif tipo == "subtitulo_texto":
+            cajon_unidad("callouts", sid, "subtitulo_texto", cambio["texto"])
+        elif tipo == "escena_texto":
+            cajon_unidad("guion", sid, "texto", cambio["texto"])
+            escenas_reescritas[sid] = cambio["texto"]
+            # la narración nueva arrastra SU plano (el prompt usa la frase)
+            unidades.setdefault("assets", []).append(sid)
+        elif tipo == "velocidad":
+            extras.setdefault("voz", {})["velocidad"] = cambio["valor"]
+            unidades["voz"] = None      # TODO el paso: la velocidad es global
+
+    with lock_de(proyecto.id):
+        for paso, extra in extras.items():
+            estado.actualizar_params(paso, extra)
+        for paso, sids in unidades.items():
+            if sids is not None:
+                estado.marcar_obsoleto(paso, sorted(set(sids)))
+        # escena_texto REESCRIBE el guion sin LLM: el texto ya está escrito
+        # (es lo que la nota pedía), y la voz lee el guion, no los params
+        if escenas_reescritas:
+            datos = estado.datos_de("guion") or {}
+            escenas = datos.get("escenas", [])
+            for indice, escena in enumerate(escenas):
+                sid = str(escena.get("id") or "")
+                if sid in escenas_reescritas:
+                    escena["narracion"] = escenas_reescritas[sid]
+                    escena["duracion_estimada"] = comun.duracion_estimada(
+                        escena["narracion"])
+            datos["escenas"] = escenas
+            datos["duracion_estimada"] = round(
+                sum(float(e.get("duracion_estimada") or 0.0)
+                    for e in escenas), 2)
+            params = estado.paso("guion").get("params") or \
+                registro.params_defecto_de("guion")
+            estado.completar("guion", params, datos,
+                             unidades=_contar_unidades(datos))
+            estado.aprobar("guion")   # lo aprobó quien lo corrigió a mano
+            trabajo.avance(f"guion reescrito en {len(escenas_reescritas)} "
+                           "escena(s), sin gastar LLM")
+    return {"extras": sorted(extras),
+            "unidades": {p: sorted(set(u)) for p, u in unidades.items() if u},
+            "escenas_reescritas": sorted(escenas_reescritas)}
+
+
+def _correr_repaso(proyecto: Proyecto, solo_notas: list[str],
+                   regenerar: bool, ambitos_vetados: tuple):
+    """UN trabajo: enrutar -> escribir cajones -> rehacer lo que toca."""
+
+    def funcion(trabajo):
+        estado = Estado(proyecto)
+        ficha = repaso.leer(proyecto)
+        pendientes = repaso.pendientes(proyecto)
+        if solo_notas:
+            queridas = set(solo_notas)
+            pendientes = [n for n in pendientes if n.get("id") in queridas]
+        if not pendientes:
+            return {"notas": [], "cambios": [], "tareas": [], "hechos": [],
+                    "avisos": ["no hay notas pendientes que aplicar"]}
+        trabajo.avance(f"re-anclando {len(pendientes)} nota(s)")
+        cortes = _tiempos_de(proyecto)
+        notas = repaso.reanclar(pendientes, cortes)
+        planos = _planos_del_repaso(proyecto)
+        contextos = {n["id"]: repaso.contexto_de_nota(n, cortes, planos)
+                     for n in notas}
+        datos = proyecto.leer()
+        reparto = repaso.enrutar(
+            notas, contextos, titulo=str(datos.get("nombre", "")),
+            duracion=sum(c["t_out"] - c["t_in"] for c in cortes),
+            estado=" · ".join(f"{p}:{estado.estado_de(p)}"
+                              for p in GRAFO
+                              if estado.estado_de(p) != "vacio"),
+            proyecto_id=proyecto.id, ambitos_vetados=ambitos_vetados,
+            avisar=trabajo.avance)
+        for aviso in reparto["avisos"]:
+            trabajo.avance(f"aviso: {aviso}")
+        cambios = reparto["cambios"]
+        if not cambios:
+            return {"reparto": reparto, "tareas": [], "hechos": [],
+                    "aplicadas": []}
+        resumen = repaso.resumen_de(reparto)
+        trabajo.avance(f"{resumen['frase']} — rehace: "
+                       f"{', '.join(resumen['tareas']) or 'nada'}"
+                       + (" (cuesta imágenes)" if resumen["cuesta_imagenes"]
+                          else ""))
+        escrito = _aplicar_cambios(proyecto, cambios, trabajo)
+        tareas = repaso.tareas_de(cambios)
+        if not proyecto.ruta("pasos/render/final.mp4").exists() \
+                and "render" in tareas:
+            # sin vídeo montado no hay nada que volver a montar
+            tareas = [t for t in tareas if t != "render"]
+            trabajo.avance("no había vídeo montado: el render se salta")
+        hechos = []
+        if regenerar:
+            # QUÉ unidades por paso: sólo las tocadas (una nota de escena
+            # no vuelve a pagar las imágenes de las demás)
+            por_paso: dict[str, list[str]] = dict(escrito["unidades"])
+            if cambios and any(c["tipo"] == "velocidad" for c in cambios):
+                por_paso["voz"] = []       # global: todo el audio
+            for paso in tareas:
+                trabajo.comprobar_cancelacion()
+                unidades_p = por_paso.get(paso) or []
+                params = estado.paso(paso).get("params") or \
+                    registro.params_defecto_de(paso)
+                trabajo.avance(f"rehaciendo {paso}"
+                               + (f" ({len(unidades_p)} unidad/es)"
+                                  if unidades_p else ""))
+                _correr(proyecto, paso, params, unidades_p)(trabajo)
+                hechos.append(paso)
+        aplicadas = repaso.marcar_aplicadas(proyecto,
+                                            [n["id"] for n in notas])
+        proyecto.bitacora("repaso_aplicado",
+                          {"notas": [n["id"] for n in notas],
+                           "cambios": [c["tipo"] for c in cambios],
+                           "tareas": tareas, "hechos": hechos})
+        return {"reparto": reparto, "resumen": resumen, "escrito": escrito,
+                "tareas": tareas, "hechos": hechos, "aplicadas": aplicadas}
+
+    return funcion
+
+
+@router.post("/{pid}/repaso/aplicar", status_code=202, dependencies=_MUTAR)
+def aplicar_repaso(pid: str, cuerpo: dict | None = None) -> dict:
+    """Aplica las notas pendientes: enruta, escribe y rehace lo justo.
+
+    `notas` limita a unas ids concretas; `regenerar: false` sólo escribe
+    los cajones y deja los pasos sucios (el modo «mirar el reparto
+    primero»); `ambitos_vetados` son ámbitos que esta pantalla no
+    arregla.
+    """
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    if GESTOR.activo_de(pid):
+        raise HTTPException(409, "ya hay un trabajo en marcha en este "
+                                 "proyecto")
+    if not repaso.pendientes(proyecto):
+        raise HTTPException(409, "no hay notas pendientes que aplicar")
+    solo_notas = [str(i) for i in cuerpo.get("notas") or []]
+    regenerar = cuerpo.get("regenerar", True) is not False
+    vetados = tuple(str(a) for a in cuerpo.get("ambitos_vetados") or ())
+    trabajo = GESTOR.lanzar(pid, "repaso", _correr_repaso(
+        proyecto, solo_notas, regenerar, vetados))
+    proyecto.bitacora("repaso_lanzado", {"trabajo": trabajo.id,
+                                         "notas": solo_notas,
+                                         "regenerar": regenerar})
+    return GESTOR.estado(trabajo.id)
+
+
+# ------------------------------------------------------- notas de montaje
+
+_FICHERO_MONTAJE = "notas_montaje.json"
+
+
+@router.get("/{pid}/montaje/notas", dependencies=[_SESION])
+def leer_notas_montaje(pid: str) -> dict:
+    """El texto libre del montaje: decisiones que no viven en params."""
+    proyecto = _proyecto_o_404(pid)
+    ficha = leer_json(proyecto.ruta(_FICHERO_MONTAJE), {}) or {}
+    return {"texto": str(ficha.get("texto", "")),
+            "actualizado": ficha.get("actualizado")}
+
+
+@router.put("/{pid}/montaje/notas", dependencies=_MUTAR)
+def guardar_notas_montaje(pid: str, cuerpo: dict) -> dict:
+    proyecto = _proyecto_o_404(pid)
+    texto = str((cuerpo or {}).get("texto", ""))[:20000]
+    with lock_de(pid):
+        escribir_json(proyecto.ruta(_FICHERO_MONTAJE),
+                      {"texto": texto, "actualizado": ahora()})
+        datos = proyecto.leer()
+        datos["actualizado"] = ahora()
+        proyecto.escribir(datos)
+    return {"texto": texto, "actualizado": ahora()}
+
+
+# ===================================================================== #
+# CAPTURAS ANOTADAS                                                    #
+# ===================================================================== #
+#
+# El feedback por escena no expresa lo que pasa en UN instante; la
+# captura sí. El navegador compone el fotograma (canvas), pinta encima
+# y sube el PNG con los trazos normalizados. Al aplicar, cada captura
+# se traduce a feedback por unidad y se rehace SOLO esa unidad.
+# Ver nucleo/capturas.py.
+
+@router.get("/{pid}/capturas", dependencies=[_SESION])
+def listar_capturas(pid: str, paso: str | None = None,
+                    escena: str | None = None,
+                    pendientes: bool | None = None) -> list[dict]:
+    return capturas.Almacen(_proyecto_o_404(pid)).listar(
+        paso=paso, escena=escena, pendientes=pendientes)
+
+
+@router.post("/{pid}/capturas", status_code=201, dependencies=_MUTAR)
+def crear_captura(pid: str, cuerpo: dict) -> dict:
+    """Guarda un fotograma anotado del reproductor de un paso."""
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    try:
+        ficha = capturas.Almacen(proyecto).crear(
+            cuerpo.get("paso"), cuerpo.get("escena"),
+            cuerpo.get("imagen"), trazos=cuerpo.get("trazos"),
+            comentario=cuerpo.get("comentario", ""),
+            t_video=cuerpo.get("t_video"), t_escena=cuerpo.get("t_escena"),
+            contexto=cuerpo.get("contexto"))
+    except capturas.ErrorCaptura as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    ficha["url"] = f"/a/{proyecto.id}/{ficha['imagen']}"
+    proyecto.bitacora("captura_creada", {"id": ficha["id"],
+                                         "paso": ficha["paso"],
+                                         "escena": ficha["escena"]})
+    return ficha
+
+
+@router.get("/{pid}/capturas/{cid}/imagen", dependencies=[_SESION])
+def leer_imagen_captura(pid: str, cid: str) -> FileResponse:
+    proyecto = _proyecto_o_404(pid)
+    almacen = capturas.Almacen(proyecto)
+    ficha = almacen.obtener(cid)
+    if not ficha:
+        raise HTTPException(404, "no hay esa captura")
+    ruta = almacen.ruta_imagen(ficha)
+    if not ruta.is_file():
+        raise HTTPException(404, "la captura perdió su PNG")
+    return FileResponse(ruta, media_type="image/png")
+
+
+@router.delete("/{pid}/capturas/{cid}", status_code=204, dependencies=_MUTAR)
+def borrar_captura(pid: str, cid: str):
+    proyecto = _proyecto_o_404(pid)
+    try:
+        borrada = capturas.Almacen(proyecto).borrar(cid)
+    except capturas.ErrorCaptura as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    if borrada is None:
+        raise HTTPException(404, "no hay esa captura")
+
+
+def _correr_capturas(proyecto: Proyecto, ids: list[str]):
+    """UN trabajo: capturas -> feedback por unidad -> rehacer lo tocado."""
+
+    def funcion(trabajo):
+        estado = Estado(proyecto)
+        almacen = capturas.Almacen(proyecto)
+        fichas = almacen.obtener_varias(ids)
+        trabajo.avance(f"traduciendo {len(fichas)} captura(s) a feedback")
+        grupos = capturas.aplicar(estado, fichas)
+        if not grupos:
+            almacen.marcar_aplicadas([f["id"] for f in fichas],
+                                     trabajo=trabajo.id)
+            return {"grupos": [], "hechos": [],
+                    "avisos": ["las capturas no apuntan a ninguna escena "
+                               "de este vídeo"]}
+        trabajo.avance("; ".join(f"{g['paso']}/{g['escena']}"
+                                 for g in grupos))
+        por_paso: dict[str, list[str]] = {}
+        for grupo in grupos:
+            por_paso.setdefault(grupo["paso"], []).append(grupo["escena"])
+        hechos = []
+        for paso in repaso.ORDEN:
+            if paso not in por_paso:
+                continue
+            trabajo.comprobar_cancelacion()
+            unidades = sorted(set(por_paso[paso]))
+            params = estado.paso(paso).get("params") or \
+                registro.params_defecto_de(paso)
+            trabajo.avance(f"rehaciendo {paso}: {', '.join(unidades)}")
+            _correr(proyecto, paso, params, unidades)(trabajo)
+            hechos.append(paso)
+        # el vídeo montado se re-monta si lo estaba
+        if hechos and proyecto.ruta("pasos/render/final.mp4").exists():
+            params = estado.paso("render").get("params") or \
+                registro.params_defecto_de("render")
+            trabajo.avance("rehaciendo render")
+            _correr(proyecto, "render", params, [])(trabajo)
+            hechos.append("render")
+        almacen.marcar_aplicadas([f["id"] for f in fichas],
+                                 trabajo=trabajo.id)
+        proyecto.bitacora("capturas_aplicadas",
+                          {"capturas": [f["id"] for f in fichas],
+                           "hechos": hechos})
+        return {"grupos": grupos, "hechos": hechos}
+
+    return funcion
+
+
+@router.post("/{pid}/capturas/aplicar", status_code=202, dependencies=_MUTAR)
+def aplicar_capturas(pid: str, cuerpo: dict | None = None) -> dict:
+    """Aplica capturas: feedback por unidad y regeneración de lo tocado."""
+    proyecto = _proyecto_o_404(pid)
+    ids = [str(i) for i in (cuerpo or {}).get("ids") or []]
+    if not ids:
+        raise HTTPException(400, "hace falta qué capturas aplicar (ids)")
+    if GESTOR.activo_de(pid):
+        raise HTTPException(409, "ya hay un trabajo en marcha en este "
+                                 "proyecto")
+    try:
+        capturas.Almacen(proyecto).obtener_varias(ids)
+    except capturas.ErrorCaptura as fallo:
+        raise HTTPException(404, str(fallo)) from None
+    trabajo = GESTOR.lanzar(pid, "capturas", _correr_capturas(proyecto, ids))
+    proyecto.bitacora("capturas_lanzadas", {"trabajo": trabajo.id,
+                                            "ids": ids})
+    return GESTOR.estado(trabajo.id)

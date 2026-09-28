@@ -29,11 +29,17 @@ def estimar(params: dict) -> dict:
             "coste": None}
 
 
-def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
+def ejecutar(proyecto: Proyecto, params: dict, trabajo,
+             solo_escenas: list | None = None) -> dict:
     guion = p2_brief.proyecto_leer_datos(proyecto, "guion")
     escenas = guion.get("escenas", [])
     if not escenas:
         raise ValueError("falta el guion: genera primero el paso anterior")
+    if solo_escenas:
+        # regrabar UNA escena (repaso) no vuelve a pagar las demás
+        escenas = [e for e in escenas if e["id"] in solo_escenas]
+        if not escenas:
+            raise ValueError("ninguna de esas escenas está en el guion")
     claves = comun.claves_actuales()
     if not voz_elevenlabs.clave(claves):
         raise voz_elevenlabs.ErrorVoz(

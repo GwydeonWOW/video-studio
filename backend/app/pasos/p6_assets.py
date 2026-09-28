@@ -44,9 +44,25 @@ def prompt_de(escena: dict, unidades: dict, estilo: str) -> str:
     pagar: lo que se ve es lo que se manda.
     """
     ficha = unidades.get(escena["id"]) or {}
+    # EL HISTORIAL DE FEEDBACK MANDA SOBRE TODO: es lo que este plano ya
+    # hizo mal (repaso, capturas anotadas). Sin releerlo, regenerar
+    # repetiría el error y la nota quedaría «aplicada».
+    correcciones = []
+    for nota in (ficha.get("feedback") or []):
+        if not isinstance(nota, dict):
+            continue
+        texto = " ".join(str(nota.get("texto") or "").split())
+        if not texto:
+            continue
+        alcance = str(nota.get("alcance") or "")
+        prefijo = ("LOCALIZED fix, keep the rest of the frame as is"
+                   if alcance == "retoque" else "Replace the subject")
+        correcciones.append(f"Correction: {prefijo}. {texto}")
     redactado = " ".join(str(ficha.get("prompt") or "").split())
     if redactado:
-        return redactado  # el redactor escribe el encargo ENTERO
+        # el redactor escribe el encargo ENTERO, pero las correcciones
+        # posteriores van ENCIMA
+        return "\n".join([redactado] + correcciones)
     direccion = " ".join(str(ficha.get("direccion") or "").split())
     piezas = []
     if estilo:
@@ -56,7 +72,7 @@ def prompt_de(escena: dict, unidades: dict, estilo: str) -> str:
     frase = str(escena.get("visual") or escena.get("narracion", "")).strip()
     if frase:
         piezas.append(frase)
-    return "\n".join(piezas) or "abstract neutral illustration"
+    return "\n".join(piezas + correcciones) or "abstract neutral illustration"
 
 
 def es_cartela(unidades: dict, escena_id: str) -> dict | None:
