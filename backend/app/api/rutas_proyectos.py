@@ -31,8 +31,9 @@ from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
                                leer_json, leer_jsonl, lock_de,
                                ruta_contenida)
 from ..nucleo.trabajos import TrabajoCancelado
-from ..pasos import (cartelas, comun, direccion, p2_brief, p3_guion, p4_voz,
-                     p6_assets, redactor, registro, repaso)
+from ..pasos import (cartelas, catalogo_visual, comun, conservar, direccion,
+                     encuadres, guia_estilo, moodboard, p2_brief, p3_guion,
+                     p4_voz, p6_assets, redactor, registro, repaso)
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
@@ -2062,3 +2063,302 @@ def aplicar_capturas(pid: str, cuerpo: dict | None = None) -> dict:
     proyecto.bitacora("capturas_lanzadas", {"trabajo": trabajo.id,
                                             "ids": ids})
     return GESTOR.estado(trabajo.id)
+
+
+# --------------------------------------------------------- catálogo visual
+
+@router.get("/{pid}/catalogo", dependencies=[_SESION])
+def leer_catalogo(pid: str) -> dict:
+    """El catálogo guardado: quién sale, dónde y con qué tono."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    catalogo = catalogo_visual.catalogo_de(params)
+    return {"catalogo": catalogo,
+            "planos": _planos_del_guion(proyecto),
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.put("/{pid}/catalogo", dependencies=_MUTAR)
+def guardar_catalogo(pid: str, cuerpo: dict) -> dict:
+    """Aprueba un catálogo: es la decisión de una persona.
+
+    El catálogo vive en params de ASSETS (regla del original): cambiar
+    cómo es un personaje cambia las imágenes, no el texto ni la voz.
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    crudo = (cuerpo or {}).get("catalogo")
+    if not isinstance(crudo, dict):
+        raise HTTPException(400, "se esperaba {catalogo: {...}}")
+    catalogo = catalogo_visual._limpiar(crudo, sorted(_ids_de_planos(proyecto)))
+    estado.actualizar_params("assets", {"catalogo": catalogo})
+    proyecto.bitacora("catalogo_guardado",
+                      {"personajes": len(catalogo["reparto"]),
+                       "sets": len(catalogo["sets"]),
+                       "beats": len(catalogo["beats"])})
+    return {"catalogo": catalogo, "avisos": catalogo.get("avisos", []),
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.post("/{pid}/catalogo/proponer", status_code=202, dependencies=_MUTAR)
+def proponer_catalogo(pid: str, cuerpo: dict | None = None) -> dict:
+    """El agente lee el guion entero y propone el catálogo (cola)."""
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+    peticion = str((cuerpo or {}).get("peticion") or "")
+
+    def funcion(trabajo):
+        return catalogo_visual.proponer(proyecto, params, trabajo,
+                                        peticion=peticion)
+
+    trabajo = GESTOR.lanzar(pid, "catalogo", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+# -------------------------------------------------------------- encuadres
+
+@router.get("/{pid}/encuadres", dependencies=[_SESION])
+def leer_encuadres(pid: str) -> dict:
+    """La escalera de cartas y qué carta cae en cada plano hoy."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    unidades = params.get("unidades") or {}
+    forzadas = {sid: str((f or {}).get("carta") or "")
+                for sid, f in unidades.items() if isinstance(f, dict)}
+    planos = _planos_del_guion(proyecto)
+    escenas = [{"id": p["id"]} for p in planos if p["id"]]
+    reparto = encuadres.repartir(escenas, semilla=proyecto.id,
+                                 forzadas=forzadas)
+    return {"catalogo": encuadres.catalogo(),
+            "reparto": {sid: carta["id"] for sid, carta in reparto.items()},
+            "forzadas": {sid: c for sid, c in forzadas.items() if c},
+            "planos": planos,
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.put("/{pid}/encuadres", dependencies=_MUTAR)
+def guardar_encuadres(pid: str, cuerpo: dict) -> dict:
+    """Fija (o libera) la carta de planos concretos.
+
+    La carta de una persona manda sobre el reparto. Un id vacío la
+    libera (vuelve a tocarle la que diga la escalera).
+    """
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    ids = _ids_de_planos(proyecto)
+    plan = (cuerpo or {}).get("plan")
+    if not isinstance(plan, dict) or not plan:
+        raise HTTPException(400, "se esperaba {plan: {plano: carta}}")
+    unidades, tocados, avisos = {}, [], []
+    for uid, crudo in plan.items():
+        sid = str(uid).strip().upper()
+        carta = str(crudo or "").strip()
+        if sid not in ids:
+            avisos.append(f"{sid}: no es un plano de este vídeo, se ignora")
+            continue
+        if carta and carta not in encuadres.POR_ID:
+            avisos.append(f"{sid}: '{carta}' no está en la escalera, se "
+                          "ignora")
+            continue
+        unidades[sid] = {"carta": carta}
+        tocados.append(sid)
+    if not tocados:
+        raise HTTPException(400, "; ".join(avisos) or "nada que guardar")
+    estado.actualizar_params("assets", {"unidades": unidades})
+    estado.marcar_obsoleto("assets", tocados)
+    proyecto.bitacora("encuadres_guardados", {"planos": tocados})
+    return {"tocados": tocados, "avisos": avisos,
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+# ----------------------------------------------------------- guía de estilo
+
+@router.get("/{pid}/guia", dependencies=[_SESION])
+def leer_guia(pid: str) -> dict:
+    """La guía de estilo escrita del proyecto (la biblia con números)."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    clave = moodboard.clave_de(guia_estilo.guia_de(params))
+    ficha_moodboard = moodboard.ficha_de(clave) if clave else {}
+    return {"guia": guia_estilo.guia_de(params),
+            "estilo": params.get("estilo", ""),
+            "moodboard": {"clave": clave,
+                          "estado": ficha_moodboard.get("estado", "falta")},
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.put("/{pid}/guia", dependencies=_MUTAR)
+def guardar_guia(pid: str, cuerpo: dict) -> dict:
+    """Aprueba una guía de estilo: números que obedecer, no adjetivos."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    crudo = (cuerpo or {}).get("guia")
+    if crudo is None:
+        raise HTTPException(400, "se esperaba {guia: {...}}")
+    if not isinstance(crudo, dict):
+        crudo = {}
+    ficha = {"guia": " ".join(str(crudo.get("guia") or "").split())}
+    for campo in guia_estilo.CAMPOS:
+        ficha[campo] = " ".join(str(crudo.get(campo) or "").split())
+    paleta = []
+    for color in (crudo.get("paleta") or []):
+        texto = str(color).strip().lower()
+        if guia_estilo._hex(texto):
+            paleta.append(texto)
+        if len(paleta) >= 16:
+            break
+    ficha["paleta"] = paleta
+    estado.actualizar_params("assets", {"guia": ficha})
+    proyecto.bitacora("guia_guardada",
+                      {"palabras": len(ficha["guia"].split()),
+                       "colores": len(paleta)})
+    return {"guia": ficha,
+            "obsoletos": estado.unidades_obsoletas("assets")}
+
+
+@router.post("/{pid}/guia/proponer", status_code=202, dependencies=_MUTAR)
+def proponer_guia(pid: str, cuerpo: dict | None = None) -> dict:
+    """El agente escribe la guía con números (cola). PROPONE, no guarda."""
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+    descripcion = str((cuerpo or {}).get("descripcion") or "")
+    peticion = str((cuerpo or {}).get("peticion") or "")
+
+    def funcion(trabajo):
+        return guia_estilo.proponer(proyecto, params, trabajo,
+                                    descripcion=descripcion,
+                                    peticion=peticion)
+
+    trabajo = GESTOR.lanzar(pid, "guia", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+# --------------------------------------------------------------- moodboard
+
+@router.get("/{pid}/moodboard", dependencies=[_SESION])
+def leer_moodboard(pid: str) -> dict:
+    """Las láminas del estilo: propuesta, banco y qué falta."""
+    proyecto = _proyecto_o_404(pid)
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    guia = guia_estilo.guia_de(params)
+    clave = moodboard.clave_de(guia)
+    if not clave:
+        return {"posible": False,
+                "por_que_no": "no hay guía escrita: las láminas saldrían "
+                              "con el estilo por defecto del generador",
+                "ejes": []}
+    ficha = moodboard.ficha_de(clave)
+    ejes = []
+    for eje in sorted(moodboard.EJES):
+        ruta = moodboard.ruta_lamina(clave, eje)
+        ejes.append({"eje": eje, "titulo": moodboard.EJES[eje]["titulo"],
+                     "hay": ruta is not None,
+                     "pendiente": eje in (ficha.get("pendientes") or []),
+                     "version": moodboard.version_de(ruta) if ruta else 0})
+    return {"posible": True, "clave": clave, "ficha": ficha, "ejes": ejes,
+            "estado": ficha.get("estado", "falta"),
+            "coste_usd": ficha.get("coste_usd", 0.0)}
+
+
+@router.post("/{pid}/moodboard/generar", status_code=202, dependencies=_MUTAR)
+def generar_moodboard(pid: str, cuerpo: dict | None = None) -> dict:
+    """Dibuja las láminas que falten como PROPUESTA (trabajo de cola).
+
+    Sólo las pedidas si el cuerpo trae 'ejes': es lo que hace útil el
+    feedback, porque en la práctica derivan unas láminas y otras salen
+    clavadas.
+    """
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+    guia = guia_estilo.guia_de(params)
+    clave = moodboard.clave_de(guia)
+    if not clave:
+        raise HTTPException(400, "no hay guía escrita: escribe o propone "
+                                 "primero la guía de estilo")
+    peticiones = (cuerpo or {}).get("peticiones") or {}
+    if not isinstance(peticiones, dict):
+        peticiones = {}
+    calidad = str((cuerpo or {}).get("calidad") or "medium")
+    if calidad not in comun.COSTE_IMAGEN:
+        calidad = "medium"
+
+    def funcion(trabajo):
+        return moodboard.generar(clave, guia, ejes=(cuerpo or {}).get("ejes"),
+                                 peticiones={k: str(v) for k, v
+                                             in peticiones.items()},
+                                 calidad=calidad, avisar=trabajo.avance,
+                                 proyecto_id=proyecto.id)
+
+    trabajo = GESTOR.lanzar(pid, "moodboard", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+@router.post("/{pid}/moodboard/aprobar", dependencies=_MUTAR)
+def aprobar_moodboard(pid: str) -> dict:
+    """Mete la propuesta en el banco global. Decisión de una persona."""
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+    clave = moodboard.clave_de(guia_estilo.guia_de(params))
+    try:
+        resultado = moodboard.aprobar(clave)
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    proyecto.bitacora("moodboard_aprobado",
+                      {"clave": clave, "ejes": resultado["ejes"]})
+    return resultado
+
+
+@router.get("/{pid}/moodboard/{eje}/imagen", dependencies=[_SESION])
+def lamina_moodboard(pid: str, eje: str, origen: str = "") -> FileResponse:
+    """Una lámina, propuesta si la hay (que es lo último dibujado)."""
+    proyecto = _proyecto_o_404(pid)
+    params = Estado(proyecto).paso("assets").get("params", {})
+    clave = moodboard.clave_de(guia_estilo.guia_de(params))
+    ruta = moodboard.ruta_lamina(clave, eje, origen) if clave else None
+    if not ruta:
+        raise HTTPException(404, "no hay lámina de ese eje")
+    return FileResponse(ruta, media_type="image/png")
+
+
+# -------------------------------------------------------------- conservación
+
+@router.post("/{pid}/conservacion", status_code=202, dependencies=_MUTAR)
+def planear_conservacion(pid: str) -> dict:
+    """Compara el guion con lo ya pagado y reparte (trabajo de cola).
+
+    Devuelve el PLAN: qué imágenes siguen valiendo, cuáles hay que
+    rehacer y por qué. MARCAR es otro gesto (aplicar), y regenerar
+    otro (el de siempre, con el coste delante).
+    """
+    proyecto = _proyecto_o_404(pid)
+
+    def funcion(trabajo):
+        return conservar.plan(proyecto, avisar=trabajo.avance)
+
+    trabajo = GESTOR.lanzar(pid, "conservacion", funcion, unidades=[])
+    return GESTOR.estado(trabajo.id)
+
+
+@router.post("/{pid}/conservacion/aplicar", dependencies=_MUTAR)
+def aplicar_conservacion(pid: str, cuerpo: dict) -> dict:
+    """Escribe el plan en el estado: MARCA lo que hay que rehacer.
+
+    Conservar no se escribe en ningún sitio: es lo que ya está en disco
+    y la regeneración por unidades lo conserva solo.
+    """
+    proyecto = _proyecto_o_404(pid)
+    if not isinstance(cuerpo, dict) or not cuerpo.get("posible"):
+        raise HTTPException(400, (cuerpo or {}).get("por_que_no")
+                            or "nada que conservar")
+    estado = Estado(proyecto)
+    try:
+        resultado = conservar.aplicar(estado, cuerpo, proyecto)
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    return {**resultado,
+            "obsoletos_assets": estado.unidades_obsoletas("assets"),
+            "obsoletos_voz": estado.unidades_obsoletas("voz")}

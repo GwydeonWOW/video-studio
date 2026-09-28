@@ -10,7 +10,9 @@ La unidad de este paso es el PLANO (una escena = un plano en esta réplica).
 El prompt de cada plano se ARMA con capas (regla de `pasos/direccion.py`):
 
     redactado  el prompt escrito entero (redactor), si existe MANDA
-    + estilo   la guia del canal, la misma en todos
+    + estilo   la guia con numeros (o el texto libre si aun no hay)
+    + carta    QUE CLASE de plano es (encuadres.py): el SHOT TYPE
+    + catalogo el sitio, la luz, quien sale y el tono del tramo
     + direccion que se ve en ESTE plano (la capa que distingue vecinos)
     + frase    la narracion de la escena
 
@@ -23,7 +25,7 @@ from __future__ import annotations
 from ..config import AJUSTES
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief
+from . import comun, p2_brief, catalogo_visual, encuadres, guia_estilo
 from ..motores import imagen_openai
 
 
@@ -37,7 +39,44 @@ def estimar(params: dict) -> dict:
             "coste": None}
 
 
-def prompt_de(escena: dict, unidades: dict, estilo: str) -> str:
+def _capas_catalogo(params: dict, sid: str) -> list[str]:
+    """El sitio, la luz y quien sale: el andamio del catálogo visual.
+
+    Sin catálogo devuelve [] (no es obligatorio), y entonces el plano
+    se arma como siempre: estilo + direccion + frase.
+    """
+    catalogo = catalogo_visual.catalogo_de(params)
+    if not catalogo.get("beats"):
+        return []
+    beat = catalogo_visual.beat_de(catalogo, sid) or {}
+    lineas = []
+    sitio = (catalogo.get("sets") or {}).get(beat.get("set")) or {}
+    lugar = " ".join(str(sitio.get("descripcion") or "").split())
+    if lugar:
+        lineas.append(f"Location: {lugar}")
+    luz = " ".join(str(sitio.get("luz") or "").split())
+    if luz:
+        lineas.append(f"Lighting: {luz}")
+    reparto = catalogo.get("reparto") or {}
+    presentes = [reparto[pid] for pid in (beat.get("personajes") or [])
+                 if pid in reparto]
+    fisicos = [" ".join(str(p.get("descripcion") or "").split())
+               for p in presentes]
+    fisicos = [f for f in fisicos if f]
+    if fisicos:
+        lineas.append("Characters in frame, draw each one exactly as "
+                      "described: " + " | ".join(fisicos))
+    tono = " ".join(str(beat.get("tono") or "").split())
+    if tono:
+        lineas.append(f"Mood: {tono}")
+    accion = " ".join(str(beat.get("accion") or "").split())
+    if accion:
+        lineas.append(f"Action: {accion}")
+    return lineas
+
+
+def prompt_de(escena: dict, unidades: dict, params: dict,
+              carta: dict | None = None) -> str:
     """El encargo de imagen de un plano, armado por capas.
 
     La misma cuenta usa la pantalla para ENSEÑAR el prompt antes de
@@ -63,10 +102,17 @@ def prompt_de(escena: dict, unidades: dict, estilo: str) -> str:
         # el redactor escribe el encargo ENTERO, pero las correcciones
         # posteriores van ENCIMA
         return "\n".join([redactado] + correcciones)
-    direccion = " ".join(str(ficha.get("direccion") or "").split())
     piezas = []
-    if estilo:
-        piezas.append(f"Style: {estilo.strip()}")
+    # la capa de estilo manda con la GUIA si la hay (la biblia con
+    # números); si no, el texto libre de siempre
+    bloque = guia_estilo.bloque_de_estilo(params)
+    if bloque:
+        piezas.append(f"Style: {bloque}" if "\n" not in bloque else bloque)
+    encuadre = " ".join(str((carta or {}).get("encuadre") or "").split())
+    if encuadre:
+        piezas.append(f"Shot type: {encuadre}")
+    piezas.extend(_capas_catalogo(params, escena["id"]))
+    direccion = " ".join(str(ficha.get("direccion") or "").split())
     if direccion:
         piezas.append(direccion)
     frase = str(escena.get("visual") or escena.get("narracion", "")).strip()
@@ -85,13 +131,22 @@ def es_cartela(unidades: dict, escena_id: str) -> dict | None:
 def ejecutar(proyecto: Proyecto, params: dict, trabajo,
              solo_escenas: list | None = None) -> dict:
     guion = p2_brief.proyecto_leer_datos(proyecto, "guion")
-    escenas = guion.get("escenas", [])
-    if not escenas:
+    todas = guion.get("escenas", [])
+    if not todas:
         raise ValueError("falta el guion: genera primero el paso anterior")
-    if solo_escenas:
-        escenas = [e for e in escenas if e["id"] in solo_escenas]
     unidades = params.get("unidades") or {}
-    estilo = params.get("estilo", "")
+    # el reparto de cartas se calcula sobre el guion ENTERO: depende del
+    # ORDEN (cada plano mira los que tiene delante), asi que
+    # regenerar uno solo no puede cambiarle la carta a los demas. La
+    # carta que haya pedido una persona (unidades[sid].carta) manda
+    # sobre el reparto.
+    forzadas = {sid: str((ficha or {}).get("carta") or "")
+                for sid, ficha in unidades.items()
+                if isinstance(ficha, dict)}
+    cartas = encuadres.repartir(todas, semilla=proyecto.id,
+                                forzadas=forzadas)
+    escenas = ([e for e in todas if e["id"] in solo_escenas]
+               if solo_escenas else todas)
     cartelas = [e for e in escenas if es_cartela(unidades, e["id"])]
     a_pagar = [e for e in escenas if not es_cartela(unidades, e["id"])]
     claves = comun.claves_actuales()
@@ -114,7 +169,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
         trabajo.avance(f"imagen {indice}/{len(escenas)}: {escena['id']} "
                        "(una a una, cuesta dinero)")
         destino = carpeta / f"{escena['id']}.png"
-        encargo = prompt_de(escena, unidades, estilo)
+        encargo = prompt_de(escena, unidades, params,
+                            carta=cartas.get(escena["id"]))
         imagen_openai.generar(
             encargo, destino, calidad=calidad, claves=claves, estilo="")
         anotar_operacion(

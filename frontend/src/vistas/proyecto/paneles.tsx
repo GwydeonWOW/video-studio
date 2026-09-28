@@ -37,6 +37,11 @@ import {
 } from "../../components/ui/dialogo"
 import { Vacio } from "./piezas"
 import { DialogoGrafismo, type PestanaGrafismo } from "./grafismo"
+import {
+  DialogoConservacion,
+  DialogoEstiloVisual,
+  type PestanaEstiloVisual,
+} from "./estilo_visual"
 
 export interface PropsPanel {
   pid: string
@@ -813,12 +818,38 @@ export function PanelAssets({
 }: PropsPanel) {
   const [grafismo_abierto, setGrafismoAbierto] = useState(false)
   const [pestana_grafismo, setPestanaGrafismo] = useState<PestanaGrafismo>("direccion")
+  const [estilo_abierto, setEstiloAbierto] = useState(false)
+  const [pestana_estilo, setPestanaEstilo] = useState<PestanaEstiloVisual>("catalogo")
+  const [conservar_abierto, setConservarAbierto] = useState(false)
   if (ficha.estado === "vacio")
     return (
-      <Vacio
-        titulo="Sin imágenes"
-        detalle="Ejecuta el paso para generar un plano por escena del guion."
-      />
+      <div className="space-y-4">
+        <Vacio
+          titulo="Sin imágenes"
+          detalle="Ejecuta el paso para generar un plano por escena del guion."
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm text-muted-foreground">
+            Antes de pagar la tanda: guía con números y moodboard aprobado.
+          </p>
+          <Boton
+            variante="secundario"
+            tamano="pequeno"
+            onClick={() => setEstiloAbierto(true)}
+            title="Catálogo visual, encuadres, guía de estilo y moodboard"
+          >
+            Estilo
+          </Boton>
+        </div>
+        <DialogoEstiloVisual
+          pid={pid}
+          abierto={estilo_abierto}
+          alCambiar={setEstiloAbierto}
+          pestana={pestana_estilo}
+          alPestana={setPestanaEstilo}
+          recargar={recargar}
+        />
+      </div>
     )
   const datos = ficha.datos as DatosAssets
   const obsoletas = ficha.unidades_obsoletas ?? []
@@ -839,6 +870,22 @@ export function PanelAssets({
           title="Dirección, redactor, cartelas y diseño: qué se ve en cada plano"
         >
           <Palette /> Grafismo
+        </Boton>
+        <Boton
+          variante="secundario"
+          tamano="pequeno"
+          onClick={() => setEstiloAbierto(true)}
+          title="Catálogo visual, encuadres, guía de estilo y moodboard: el estilo del vídeo"
+        >
+          Estilo
+        </Boton>
+        <Boton
+          variante="secundario"
+          tamano="pequeno"
+          onClick={() => setConservarAbierto(true)}
+          title="Cuando el guion cambia: qué imágenes ya pagadas siguen valiendo"
+        >
+          Conservar
         </Boton>
         {hay_obsoletas && (
           <Boton
@@ -943,6 +990,20 @@ export function PanelAssets({
         alCambiar={setGrafismoAbierto}
         pestana={pestana_grafismo}
         alPestana={setPestanaGrafismo}
+        recargar={recargar}
+      />
+      <DialogoEstiloVisual
+        pid={pid}
+        abierto={estilo_abierto}
+        alCambiar={setEstiloAbierto}
+        pestana={pestana_estilo}
+        alPestana={setPestanaEstilo}
+        recargar={recargar}
+      />
+      <DialogoConservacion
+        pid={pid}
+        abierto={conservar_abierto}
+        alCambiar={setConservarAbierto}
         recargar={recargar}
       />
     </div>

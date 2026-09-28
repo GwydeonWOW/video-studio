@@ -526,6 +526,156 @@ export interface NotasMontaje {
   actualizado?: string
 }
 
+/* ---------- catálogo, encuadres, guía, moodboard, conservación (Fase F) ---------- */
+
+/** Una entrada del reparto: la descripción física que viaja al generador. */
+export interface PersonajeCatalogo {
+  nombre: string
+  papel: string
+  descripcion: string
+  palabras: string[]
+  grupo: boolean
+}
+
+/** Un set: un LUGAR, no un plano. */
+export interface SetCatalogo {
+  rotulo: string
+  descripcion: string
+  palabras: string[]
+  luz: string
+}
+
+/** Un tramo de escenas que comparten sitio, reparto y tono. */
+export interface BeatCatalogo {
+  desde: string
+  hasta: string
+  set: string | null
+  personajes: string[]
+  tono: string
+  accion: string
+}
+
+/** El catálogo visual del vídeo (params.assets.catalogo). */
+export interface CatalogoVisual {
+  reparto: Record<string, PersonajeCatalogo>
+  sets: Record<string, SetCatalogo>
+  beats: BeatCatalogo[]
+  capitulos: Record<string, { titulo: string; subtitulo: string }>
+  lugares: Record<string, string>
+  avisos: string[]
+  cobertura?: number
+}
+
+/** Respuesta de GET /{pid}/catalogo. */
+export interface FichaCatalogo {
+  catalogo: CatalogoVisual
+  planos: PlanoGrafismo[]
+  obsoletos: string[]
+}
+
+/** Propuesta del agente de catálogo (POST /{pid}/catalogo/proponer). */
+export interface PropuestaCatalogo {
+  catalogo: CatalogoVisual
+  personajes: number
+  sets: number
+  beats: number
+  avisos: string[]
+}
+
+/** Una clase de plano de la escalera. */
+export interface CartaEncuadre {
+  id: string
+  nombre: string
+  familia: string
+  peso: number
+  abstracta: boolean
+}
+
+/** Respuesta de GET /{pid}/encuadres. */
+export interface FichaEncuadres {
+  catalogo: CartaEncuadre[]
+  reparto: Record<string, string>
+  forzadas: Record<string, string>
+  planos: PlanoGrafismo[]
+  obsoletos: string[]
+}
+
+/** La guía de estilo escrita, con números (params.assets.guia). */
+export interface FichaGuia {
+  guia: string
+  paleta: string[]
+  trazo: string
+  relleno: string
+  personajes: string
+  caras: string
+  manos: string
+  fondos: string
+  luz: string
+  composicion: string
+  acabado: string
+  evitar: string
+  resumen_es: string
+  descripcion?: string
+  peticion?: string
+}
+
+/** Respuesta de GET /{pid}/guia. */
+export interface FichaGuiaPantalla {
+  guia: Partial<FichaGuia>
+  estilo: string
+  moodboard: { clave: string; estado: string }
+  obsoletos: string[]
+}
+
+/** Propuesta del agente de guía (POST /{pid}/guia/proponer). */
+export interface PropuestaGuia {
+  guia: FichaGuia
+  palabras: number
+  colores: number
+}
+
+/** Un eje del moodboard y su lámina. */
+export interface EjeMoodboard {
+  eje: string
+  titulo: string
+  hay: boolean
+  pendiente: boolean
+  version: number
+}
+
+/** Respuesta de GET /{pid}/moodboard. */
+export interface FichaMoodboard {
+  posible: boolean
+  por_que_no?: string
+  clave?: string
+  ejes: EjeMoodboard[]
+  estado?: string
+  coste_usd?: number
+  pendientes?: string[]
+}
+
+/** El reparto de conservación (resultado del trabajo «conservacion»). */
+export interface PlanConservacion {
+  posible: boolean
+  por_que_no?: string
+  conservar: string[]
+  rehacer: string[]
+  motivos: Record<string, string>
+  regrabar_voz: string[]
+  resumen: string
+  escenas?: Record<string, { estado: string; parecido: number; solape: number }>
+}
+
+/** Respuesta de POST /{pid}/conservacion/aplicar. */
+export interface ResultadoConservacion {
+  tocados: Record<string, string[]>
+  conservados: number
+  rehacer: number
+  regrabar: number
+  obsoletos_assets: string[]
+  obsoletos_voz: string[]
+}
+
 export interface Escena {
   id: string
   titulo?: string
@@ -554,6 +704,10 @@ export const NOMBRES_PASOS: Record<string, string> = {
   cartelas: "Cartelas",
   repaso: "Repaso",
   capturas: "Capturas",
+  catalogo: "Catálogo",
+  guia: "Guía de estilo",
+  moodboard: "Moodboard",
+  conservacion: "Conservación",
 }
 
 export const ORDEN_PASOS: IdPaso[] = [
