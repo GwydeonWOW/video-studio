@@ -1,0 +1,5 @@
+# Los ficheros que viajan al contenedor deben conservar LF:
+# un shebang con CRLF ("#!/bin/sh\r") rompe el entrypoint en Linux.
+*.sh text eol=lf
+Dockerfile text eol=lf
+entrypoint.sh text eol=lf

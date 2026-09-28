@@ -11,16 +11,20 @@ RUN npm run build
 # Imagen final: Python + ffmpeg + fuentes, sin herramientas de build.
 FROM python:3.12-slim
 
-# ffmpeg para audio/vídeo, DejaVu para los rótulos (drawtext/PIL) y
-# ca-certificates para las llamadas HTTPS a los proveedores.
+# ffmpeg para audio/vídeo, DejaVu para los rótulos (drawtext/PIL),
+# ca-certificates para las llamadas HTTPS y gosu para bajar de root a
+# "estudio" tras arreglar los permisos del volumen (los orquestadores
+# como Coolify montan /datos como root y tapan el chown de build).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-dejavu-core \
         ca-certificates \
+        gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Usuario sin privilegios: la API nunca necesita root.
+# Usuario sin privilegios: la API nunca necesita root (salvo el ajuste
+# inicial de permisos del volumen, que hace el entrypoint).
 RUN useradd --system --create-home --shell /usr/sbin/nologin estudio
 
 WORKDIR /srv
@@ -41,7 +45,12 @@ ENV ESTUDIO_DATOS=/datos \
     PYTHONUNBUFFERED=1
 
 RUN mkdir -p /datos && chown -R estudio:estudio /srv /datos
-USER estudio
+
+# Arranca como root, cede /datos al usuario de la app (el montaje de
+# Coolify llega como root) y ejecuta el servicio como "estudio".
+COPY entrypoint.sh /srv/entrypoint.sh
+RUN chmod +x /srv/entrypoint.sh
+ENTRYPOINT ["/srv/entrypoint.sh"]
 
 EXPOSE 8000
 
