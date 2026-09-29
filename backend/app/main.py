@@ -82,7 +82,12 @@ def _montar_interfaz(aplicacion: FastAPI) -> None:
             return FileResponse(destino)
         indice = web / "index.html"
         if indice.is_file():
-            return FileResponse(indice)
+            # el HTML de la SPA SIEMPRE se revalida: los assets van con
+            # hash en el nombre, pero un indice cacheado tras un deploy
+            # seguiria pidiendo los assets VIEJOS (y mostrando la
+            # interfaz anterior). "no-cache" revalida, no prohíbe.
+            return FileResponse(indice, headers={
+                "Cache-Control": "no-cache, must-revalidate"})
         return JSONResponse({"error": "no hay interfaz construida"},
                             status_code=404)
 

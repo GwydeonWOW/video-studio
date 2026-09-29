@@ -31,6 +31,18 @@ except ImportError:  # uso suelto
 AUTH = "https://auth.openai.com"
 ALCANCE = "openid profile email offline_access"
 
+#: auth.openai.com esta detras de Cloudflare y el User-Agent por defecto
+#: de requests (`python-requests/x.y`) cae en su lista de bots: contesta
+#: 403 con la pagina "Just a moment..." en vez del JSON. Este flujo ES
+#: el del CLI de Codex, asi que nos identificamos como el CLI (mismo
+#: UA y misma cabecera `originator` que manda codex_cli_rs).
+CABECERAS = {
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": "codex_cli_rs/0.42.0 (Windows 11; x86_64) video-studio",
+    "originator": "codex_cli_rs",
+}
+
 #: Cliente publico del CLI de Codex (no es secreto: va impreso en el
 #: binario de cualquiera). Se permite override por entorno por si OpenAI
 #: lo retira y sale uno nuevo.
@@ -84,7 +96,7 @@ def iniciar(carpeta: Path | str) -> dict:
     try:
         respuesta = requests.post(
             f"{AUTH}/oauth/device/code",
-            headers={"Accept": "application/json"},
+            headers=CABECERAS,
             data={"client_id": CLIENTE_ID, "scope": ALCANCE},
             timeout=30)
     except requests.RequestException as fallo:
@@ -121,7 +133,7 @@ def sondear(carpeta: Path | str) -> dict:
     try:
         respuesta = requests.post(
             f"{AUTH}/oauth/token",
-            headers={"Accept": "application/json"},
+            headers=CABECERAS,
             data={"grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                   "client_id": CLIENTE_ID,
                   "device_code": _pendiente["device_code"]},
@@ -178,7 +190,7 @@ def refrescar(carpeta: Path | str, datos: dict) -> dict:
     try:
         respuesta = requests.post(
             f"{AUTH}/oauth/token",
-            headers={"Accept": "application/json"},
+            headers=CABECERAS,
             data={"grant_type": "refresh_token",
                   "client_id": CLIENTE_ID, "refresh_token": refresh},
             timeout=30)
