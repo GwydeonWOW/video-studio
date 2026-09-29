@@ -222,6 +222,37 @@ check("llamar(glm) ataca el endpoint del Coding Plan",
       texto == "hola glm" and _red_llm.peticiones[-1]["url"]
       == "https://api.z.ai/api/coding/paas/v4/chat/completions",
       _red_llm.peticiones[-1]["url"])
+check("llamar(glm) viaja con el pensamiento apagado",
+      _red_llm.peticiones[-1]["json"].get("thinking")
+      == {"type": "disabled"},
+      json.dumps(_red_llm.peticiones[-1]["json"].get("thinking")))
+
+# glm (Coding Plan): un 400 que señale «thinking» se alivia reintentando
+_red_llm.cola_post.append(_Respuesta(codigo=400, cuerpo={
+    "error": {"message": "Invalid parameter: thinking"}}))
+_red_llm.cola_post.append(_Respuesta(cuerpo={
+    "choices": [{"message": {"content": "hola sin pensar"},
+                 "finish_reason": "stop"}],
+    "usage": {}}))
+texto = llm.llamar(llm.Llamada(proveedor="glm", modelo="glm-5.3",
+                               instruccion="di hola"),
+                   claves={"glm": "clave-glm"})
+check("glm ante un 400 de thinking: lo quita y reintenta",
+      texto == "hola sin pensar"
+      and "thinking" not in _red_llm.peticiones[-1]["json"],
+      str(_red_llm.peticiones[-1]["json"].get("thinking")))
+
+# glm (Coding Plan): la respuesta vacia denuncia el finish_reason
+_red_llm.cola_post.append(_Respuesta(cuerpo={
+    "choices": [{"message": {"content": ""}, "finish_reason": "length"}]}))
+try:
+    llm.llamar(llm.Llamada(proveedor="glm", modelo="glm-5.3",
+                           instruccion="di hola"),
+               claves={"glm": "clave-glm"})
+    check("la respuesta vacia trae el finish (length)", False, "no fallo")
+except llm.ErrorLLM as fallo:
+    check("la respuesta vacia trae el finish (length)", "length" in str(fallo),
+          str(fallo)[:90])
 
 # -------------------------------- codex: caducidad y desconexión
 

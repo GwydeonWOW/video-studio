@@ -178,6 +178,24 @@ def _base_de(proveedor: str, ajustes_proveedor: dict | None = None) -> str:
     return PROVEEDORES[proveedor]["base"]
 
 
+def _aliviar_400(cuerpo: dict, detalle: str) -> bool:
+    """Un 400 de esquema openai suele ser un parametro que el modelo no
+    admite (temperature en los de razonamiento, thinking donde no llego).
+    Se quita el señalado por el mensaje y se reintenta en el acto.
+    Devuelve True si el cuerpo cambio."""
+    cambiado = False
+    if "temperature" in detalle and "temperature" in cuerpo:
+        cuerpo.pop("temperature", None)
+        cambiado = True
+    if "thinking" in detalle and "thinking" in cuerpo:
+        cuerpo.pop("thinking", None)
+        cambiado = True
+    if "max_tokens" in detalle and "max_tokens" in cuerpo:
+        cuerpo["max_completion_tokens"] = cuerpo.pop("max_tokens")
+        cambiado = True
+    return cambiado
+
+
 def llamar(llamada: Llamada, claves: dict | None = None,
            ajustes_proveedor: dict | None = None) -> str:
     """Llama al LLM y devuelve el texto de la respuesta.
@@ -226,6 +244,12 @@ def llamar(llamada: Llamada, claves: dict | None = None,
         cuerpo = {"model": llamada.modelo, "messages": mensajes,
                   "max_tokens": llamada.max_tokens,
                   "temperature": llamada.temperatura}
+        if llamada.proveedor == "glm":
+            # glm-5.x razona antes de contestar y el razonamiento sale del
+            # MISMO presupuesto de max_tokens: con un guion largo se lo come
+            # entero y la respuesta llega con content VACIO (finish length,
+            # tres minutos perdidos). Sin pensamiento: directo y con texto.
+            cuerpo["thinking"] = {"type": "disabled"}
     else:
         cabeceras["x-api-key"] = clave
         cabeceras["anthropic-version"] = "2023-06-01"
@@ -257,15 +281,7 @@ def llamar(llamada: Llamada, claves: dict | None = None,
             if respuesta.status_code == 400 and esquema == "openai":
                 # los modelos de razonamiento nuevos rechazan parametros
                 # clasicos: se quitan y se reintenta en el acto
-                detalle = respuesta.text[:500].lower()
-                cambiado = False
-                if "temperature" in detalle and "temperature" in cuerpo:
-                    cuerpo.pop("temperature", None)
-                    cambiado = True
-                if "max_tokens" in detalle and "max_tokens" in cuerpo:
-                    cuerpo["max_completion_tokens"] = cuerpo.pop("max_tokens")
-                    cambiado = True
-                if cambiado:
+                if _aliviar_400(cuerpo, respuesta.text[:500].lower()):
                     continue
             ultimo_error = (f"{respuesta.status_code}: {respuesta.text[:300]}")
         if intento < INTENTOS:
@@ -381,7 +397,15 @@ def _extraer(cuerpo: dict, esquema: str) -> tuple[str, dict]:
     except (KeyError, IndexError, TypeError) as fallo:
         raise ErrorLLM(f"respuesta inesperada del LLM: {fallo}") from fallo
     if not texto:
-        raise ErrorLLM("el LLM devolvio una respuesta vacia")
+        # el finish dice POR QUE vino vacia: "length" = se quedo sin
+        # presupuesto (el razonamiento se lo comio en glm-5.x)
+        if esquema == "anthropic":
+            fin = cuerpo.get("stop_reason")
+        else:
+            eleccion = (cuerpo.get("choices") or [{}])[0] or {}
+            fin = eleccion.get("finish_reason")
+        raise ErrorLLM("el LLM devolvio una respuesta vacia "
+                       f"(finish: {fin or '?'})")
     return texto, {"entrada": uso.get("input_tokens",
                                       uso.get("prompt_tokens", 0)),
                    "salida": uso.get("output_tokens",
@@ -567,6 +591,10 @@ def llamar_conversacion(llamada: Llamada, mensajes: list[dict],
                         "messages": _abrir_mensajes(mensajes,
                                                     llamada.sistema, esquema),
                         "max_tokens": llamada.max_tokens}
+        if llamada.proveedor == "glm":
+            # mismo motivo que en llamar(): sin pensamiento no se come el
+            # presupuesto ni deja al asistente esperando un vacio
+            cuerpo["thinking"] = {"type": "disabled"}
         if llamada.temperatura:
             cuerpo["temperature"] = llamada.temperatura
         if herramientas:
@@ -614,6 +642,9 @@ def llamar_conversacion(llamada: Llamada, mensajes: list[dict],
                 raise ErrorLLM(
                     f"{llamada.proveedor} rechazo la llamada "
                     f"({respuesta.status_code}): {respuesta.text[:300]}")
+            if respuesta.status_code == 400 and esquema == "openai":
+                if _aliviar_400(cuerpo, respuesta.text[:500].lower()):
+                    continue
             ultimo_error = f"{respuesta.status_code}: {respuesta.text[:300]}"
         if intento < INTENTOS:
             time.sleep(2 ** intento)
