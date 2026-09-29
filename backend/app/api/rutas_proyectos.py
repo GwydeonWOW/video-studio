@@ -174,6 +174,8 @@ def crear(cuerpo: dict) -> dict:
     estilo_canal = estilo.leer(AJUSTES.datos)
     if estilo_canal["definido"]:
         estilo.aplicar_a_params(params_por_paso, estilo_canal)
+        # y el kit visual con él: el look del canal, copiado a lo suyo
+        estilo.sembrar_kit(AJUSTES.datos, proyecto)
     for paso in GRAFO:
         estado.guardar_params(paso, params_por_paso[paso])
     proyecto.bitacora("proyecto_creado", {"nombre": nombre})
@@ -323,10 +325,12 @@ def aplicar_estilo(pid: str) -> dict:
             if params != (estado.paso(paso).get("params") or {}):
                 estado.guardar_params(paso, params)
                 tocados.append(paso)
+        sembro_kit = estilo.sembrar_kit(AJUSTES.datos, proyecto)
         ficha = proyecto.leer()
         ficha["actualizado"] = ahora()
         proyecto.escribir(ficha)
-    proyecto.bitacora("estilo_aplicado", {"pasos": tocados})
+    proyecto.bitacora("estilo_aplicado", {"pasos": tocados,
+                                          "kit": sembro_kit})
     # la cascada que VERIA la persona al regenerar: pasos tocados con
     # material e hijos con material (igual que guardar_params)
     afectados = set(tocados)
@@ -2218,8 +2222,13 @@ def leer_guia(pid: str) -> dict:
     params = estado.paso("assets").get("params", {})
     clave = moodboard.clave_de(guia_estilo.guia_de(params))
     ficha_moodboard = moodboard.ficha_de(clave) if clave else {}
+    carpeta = proyecto.ruta("estilo", "aportadas")
     return {"guia": guia_estilo.guia_de(params),
             "estilo": params.get("estilo", ""),
+            "aportadas": sorted(r.name for r in carpeta.iterdir()
+                                if r.is_file()
+                                and r.suffix.lower() in estilo.EXT_KIT)
+            if carpeta.is_dir() else [],
             "moodboard": {"clave": clave,
                           "estado": ficha_moodboard.get("estado", "falta")},
             "obsoletos": estado.unidades_obsoletas("assets")}
@@ -2256,15 +2265,26 @@ def guardar_guia(pid: str, cuerpo: dict) -> dict:
 
 @router.post("/{pid}/guia/proponer", status_code=202, dependencies=_MUTAR)
 def proponer_guia(pid: str, cuerpo: dict | None = None) -> dict:
-    """El agente escribe la guía con números (cola). PROPONE, no guarda."""
+    """El agente escribe la guía con números (cola). PROPONE, no guarda.
+
+    Con aportadas en `estilo/` (el kit del canal heredado al crear, o
+    material subido al proyecto) la guía nace de MIRARLAS: son el
+    material humano y viajan adjuntas a la llamada.
+    """
     proyecto = _proyecto_o_404(pid)
     params = Estado(proyecto).paso("assets").get("params", {})
     descripcion = str((cuerpo or {}).get("descripcion") or "")
     peticion = str((cuerpo or {}).get("peticion") or "")
+    carpeta = proyecto.ruta("estilo", "aportadas")
+    imagenes = sorted(str(r) for r in carpeta.iterdir()
+                      if r.is_file()
+                      and r.suffix.lower() in estilo.EXT_KIT) \
+        if carpeta.is_dir() else []
 
     def funcion(trabajo):
         return guia_estilo.proponer(proyecto, params, trabajo,
                                     descripcion=descripcion,
+                                    imagenes=imagenes,
                                     peticion=peticion)
 
     trabajo = GESTOR.lanzar(pid, "guia", funcion, unidades=[])

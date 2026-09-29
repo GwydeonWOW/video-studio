@@ -705,6 +705,22 @@ function PestanaGuia({ pid, recargar }: { pid: string; recargar: () => void }) {
           className="text-xs"
         />
       </div>
+      {ficha.aportadas?.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">
+            la guía se escribe MIRANDO estas imágenes (kit heredado del canal):
+          </span>
+          {ficha.aportadas.map((n) => (
+            <img
+              key={n}
+              src={`/a/${pid}/estilo/aportadas/${encodeURIComponent(n)}`}
+              alt={n}
+              title={n}
+              className="h-12 w-12 rounded-md border object-cover"
+            />
+          ))}
+        </div>
+      )}
       <div className="space-y-2">
         <Etiqueta className="text-xs">La guía (inglés, imperativo, con cifras)</Etiqueta>
         <AreaTexto

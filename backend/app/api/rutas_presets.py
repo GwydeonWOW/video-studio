@@ -688,8 +688,18 @@ def subir_aportadas(cuerpo: dict) -> dict:
     entradas = (cuerpo or {}).get("imagenes")
     if not isinstance(entradas, list):
         entradas = []
-    buzon = _carpeta_aportadas()
-    buzon.mkdir(parents=True, exist_ok=True)
+    aceptadas, avisos = guardar_imagenes(entradas, _carpeta_aportadas())
+    return {"imagenes": aceptadas, "avisos": avisos,
+            "tope": presets_light.max_imagenes_estilo()}
+
+
+def guardar_imagenes(entradas: list, carpeta: Path) -> tuple[list, list]:
+    """Decodifica y guarda entradas base64 en `carpeta`. -> (aceptadas, avisos)
+
+    Compartido por el buzón del modo light y el kit del canal (pantalla
+    Estilo): mismo transporte, mismos topes, mismos avisos por entrada.
+    """
+    carpeta.mkdir(parents=True, exist_ok=True)
     aceptadas, avisos = [], []
     for entrada in entradas:
         if not isinstance(entrada, dict):
@@ -714,12 +724,11 @@ def subir_aportadas(cuerpo: dict) -> dict:
             avisos.append(f"{nombre}: pesa más de "
                           f"{MAX_BYTES_APORTADA // (1024 * 1024)} MB")
             continue
-        destino = buzon / f"{uuid4().hex[:12]}{sufijo}"
+        destino = carpeta / f"{uuid4().hex[:12]}{sufijo}"
         destino.write_bytes(datos)
         aceptadas.append({"nombre": destino.name, "origen": nombre,
                           "bytes": len(datos)})
-    return {"imagenes": aceptadas, "avisos": avisos,
-            "tope": presets_light.max_imagenes_estilo()}
+    return aceptadas, avisos
 
 
 def _sufijo_de_data_url(datos_url: str) -> str:

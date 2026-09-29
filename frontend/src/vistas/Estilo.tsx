@@ -4,6 +4,7 @@ import { toast } from "sonner"
 import { Loader2, Palette, Save } from "lucide-react"
 import { api } from "../lib/api"
 import type { EstiloCanal, Voz } from "../lib/tipos"
+import { KitVisual, subir_imagenes } from "../components/kit_visual"
 import { Boton } from "../components/ui/button"
 import { Insignia } from "../components/ui/badge"
 import { Entrada } from "../components/ui/input"
@@ -29,12 +30,16 @@ const VACIO: EstiloCanal = {
   voz: "",
   velocidad: 1.0,
   actualizado: "",
+  kit: [],
 }
+
+const TOPE_KIT = 24
 
 export default function Estilo() {
   const [estilo, setEstilo] = useState<EstiloCanal | null>(null)
   const [voces, setVoces] = useState<Voz[]>([])
   const [guardando, setGuardando] = useState(false)
+  const [subiendoKit, setSubiendoKit] = useState(false)
 
   useEffect(() => {
     api
@@ -52,6 +57,40 @@ export default function Estilo() {
 
   const poner = (campo: keyof EstiloCanal, valor: string | number) =>
     setEstilo((prev) => (prev ? { ...prev, [campo]: valor } : prev))
+
+  /* el kit visual: sube al CANON del canal (persiste, no es buzón) y
+     cada vídeo nuevo lo hereda sembrado */
+  const al_elegir_kit = async (ficheros: FileList | File[]) => {
+    if (!estilo) return
+    setSubiendoKit(true)
+    try {
+      const r = await subir_imagenes(
+        "/api/estilo/imagenes",
+        ficheros,
+        estilo.kit.length,
+        TOPE_KIT,
+      )
+      if (r.imagenes.length) toast.success("imágenes añadidas al kit del canal")
+      r.avisos.forEach((a) => toast.warning(a))
+      const nuevo = await api.get<EstiloCanal>("/api/estilo")
+      setEstilo(nuevo)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setSubiendoKit(false)
+    }
+  }
+
+  const quitar_del_kit = async (nombre: string) => {
+    try {
+      await api.borrar(`/api/estilo/imagenes/${nombre}`)
+    } catch {
+      /* si ya no está, fuera igualmente */
+    }
+    setEstilo((prev) =>
+      prev ? { ...prev, kit: prev.kit.filter((n) => n !== nombre) } : prev,
+    )
+  }
 
   const guardar = async () => {
     if (!estilo) return
@@ -171,6 +210,26 @@ export default function Estilo() {
               alCambiar={(e) => poner("estilo_grafico", e.target.value)}
               placeholder="Cómo se dibuja: paleta, técnica, encuadres, luz… (entra en cada prompt de imagen)"
             />
+          </div>
+
+          <div className="space-y-2">
+            <Etiqueta>
+              <Palette className="mr-1 inline h-3 w-3" />
+              Kit visual del canal
+            </Etiqueta>
+            <KitVisual
+              imagenes={estilo.kit.map((nombre) => ({ nombre }))}
+              url={(n) => `/api/estilo/imagenes/${n}`}
+              tope={TOPE_KIT}
+              subiendo={subiendoKit}
+              alElegir={al_elegir_kit}
+              alQuitar={quitar_del_kit}
+            />
+            <p className="text-xs text-muted-foreground">
+              Tus imágenes de referencia. La guía de estilo de cada vídeo
+              nuevo se escribe MIRÁNDOLO: esto es el material, y lo escrito
+              arriba son indicaciones que mandan sobre lo que se vea.
+            </p>
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">

@@ -461,6 +461,8 @@ export interface EstiloCanal {
   voz: string
   velocidad: number
   actualizado: string
+  /** nombres de las imágenes del kit visual, en orden */
+  kit: string[]
 }
 
 /* ---------- repaso, capturas y montaje (Fase D) ---------- */
@@ -657,6 +659,7 @@ export interface FichaGuiaPantalla {
   estilo: string
   moodboard: { clave: string; estado: string }
   obsoletos: string[]
+  aportadas: string[]
 }
 
 /** Propuesta del agente de guía (POST /{pid}/guia/proponer). */

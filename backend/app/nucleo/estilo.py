@@ -15,6 +15,8 @@ es lo que mantiene coherente la invalidación en cascada.
 """
 from __future__ import annotations
 
+import re
+import shutil
 from pathlib import Path
 
 try:
@@ -36,7 +38,18 @@ ESTILO_DEFECTO: dict = {
     "voz": "",              # voice_id de ElevenLabs; "" -> defecto del paso
     "velocidad": 1.0,
     "actualizado": "",
+    "kit": [],              # imágenes de referencia del canal (nombres en _kit_canal)
 }
+
+#: El kit visual del canal: lo que sube quien lo tiene claro. Las imágenes
+#: viven en `datos/_kit_canal/` (con `_` para que ningún listado las tome
+#: por proyecto) y `estilo.json` guarda los nombres EN ORDEN. No es un
+#: buzón como el del modo light: este kit es CANÓNICO y persiste hasta que
+#: alguien lo quita — es el look que hereda cada vídeo nuevo.
+CARPETA_KIT = "_kit_canal"
+EXT_KIT = (".png", ".jpg", ".jpeg", ".webp")
+MAX_KIT = 24
+_NOMBRE_KIT = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 
 _LIMITES = {"ritmo_min": (5, 120), "ritmo_max": (5, 180),
             "velocidad": (0.7, 1.2)}
@@ -86,7 +99,66 @@ def _sanear(estilo: dict) -> dict:
         estilo["ritmo_max"] = estilo["ritmo_min"]
     estilo["voz"] = str(estilo.get("voz", ""))[:64]
     estilo["actualizado"] = str(estilo.get("actualizado", ""))
+    estilo["kit"] = _sanear_kit(estilo.get("kit"))
     return estilo
+
+
+def _sanear_kit(crudo) -> list[str]:
+    """Nombres LLANOS y sin repetir, en orden, con tope."""
+    salida: list[str] = []
+    for nombre in crudo or []:
+        texto = str(nombre or "").strip()
+        if _NOMBRE_KIT.match(texto) and texto not in salida:
+            salida.append(texto)
+        if len(salida) >= MAX_KIT:
+            break
+    return salida
+
+
+def carpeta_kit(carpeta_datos: Path | str) -> Path:
+    return Path(carpeta_datos) / CARPETA_KIT
+
+
+def rutas_kit(carpeta_datos: Path | str) -> list[Path]:
+    """Las imágenes del kit que existen de verdad, en orden. -> [Path]
+
+    Las rutas viajan ADJUNTAS a la llamada que escribe la guía de estilo:
+    el kit es el material humano y la guía se escribe MIRÁNDOLO.
+    """
+    carpeta = carpeta_kit(carpeta_datos)
+    if not carpeta.is_dir():
+        return []
+    return [carpeta / n for n in leer(carpeta_datos)["kit"]
+            if (carpeta / n).is_file()]
+
+
+def guardar_nombres_kit(carpeta_datos: Path | str, nombres: list[str]) -> dict:
+    """Fija la lista de nombres del kit (tras subir o quitar imágenes)."""
+    estilo = leer(carpeta_datos)
+    estilo["kit"] = _sanear_kit(nombres)
+    escribir_json(fichero(carpeta_datos), estilo)
+    return estilo
+
+
+def sembrar_kit(carpeta_datos: Path | str, proyecto) -> bool:
+    """Copia el kit del canal a `<proyecto>/estilo/aportadas/`. -> si sembró
+
+    Igual que el resto del estilo, esto COPIA y no referencia: el vídeo
+    guarda su propio material y los cambios posteriores del kit del canal
+    no le tocan (reaplicar el estilo lo refresca a mano). El destino se
+    VACÍA antes: lo que se siembra es EL kit, no una adición al viejo.
+    Sin kit no se toca nada — el proyecto puede tener aportadas suyas.
+    """
+    rutas = rutas_kit(carpeta_datos)
+    if not rutas:
+        return False
+    destino = proyecto.ruta("estilo", "aportadas")
+    if destino.is_dir():
+        shutil.rmtree(destino)
+    destino.mkdir(parents=True, exist_ok=True)
+    for indice, ruta in enumerate(rutas, start=1):
+        shutil.copy2(str(ruta), str(destino / f"{indice:02d}_{ruta.name}"))
+    return True
 
 
 def aplicar_a_params(params_por_paso: dict, estilo: dict | None = None) -> dict:

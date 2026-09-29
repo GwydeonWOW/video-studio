@@ -12,7 +12,6 @@ import { toast } from "sonner"
 import {
   AlertTriangle,
   Copy,
-  ImagePlus,
   Loader2,
   Music,
   Play,
@@ -20,11 +19,11 @@ import {
   Sparkles,
   Trash2,
   Wand2,
-  X,
 } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares, segundos } from "../lib/utils"
 import { usarTrabajo } from "../lib/trabajos"
+import { KitVisual, subir_imagenes } from "../components/kit_visual"
 import {
   type EncargoLight,
   type FichaPresetLight,
@@ -32,7 +31,6 @@ import {
   type ImagenAportada,
   type PlanLight,
   type PresetCanal,
-  type RespuestaAportadas,
   type TrabajoFicha,
 } from "../lib/tipos"
 import { Boton } from "../components/ui/button"
@@ -79,145 +77,14 @@ const encargo_vacio = (ritmo: string): EncargoLight => ({
 
 /* --------------------------------------------- el kit visual del canal */
 
-const EXT_APORTADAS = [".png", ".jpg", ".jpeg", ".webp"]
-const MAX_MB_APORTADA = 10
-
-const leer_como_data_url = (f: File): Promise<string> =>
-  new Promise((ok, ko) => {
-    const lector = new FileReader()
-    lector.onload = () => ok(String(lector.result))
-    lector.onerror = () => ko(lector.error ?? new Error("lectura fallida"))
-    lector.readAsDataURL(f)
-  })
-
 /** Sube ficheros al buzón del servidor (base64 en JSON, como las
  *  capturas). Lo que no pasa, vuelve en avisos: nada tira el resto. */
-async function subir_imagenes(
+async function subir_al_buzon(
   ficheros: FileList | File[],
   ya: number,
   tope: number,
 ): Promise<{ imagenes: ImagenAportada[]; avisos: string[] }> {
-  const lista = Array.from(ficheros)
-  const avisos: string[] = []
-  const hueco = Math.max(tope - ya, 0)
-  if (lista.length > hueco)
-    avisos.push(
-      `el tope es ${tope}: se suben ${hueco} y se dejan ${lista.length - hueco}`,
-    )
-  const entradas: { nombre: string; datos: string }[] = []
-  for (const f of lista.slice(0, hueco)) {
-    const punto = f.name.lastIndexOf(".")
-    const ext = punto < 0 ? "" : f.name.slice(punto).toLowerCase()
-    if (!EXT_APORTADAS.includes(ext)) {
-      avisos.push(`${f.name}: no es png, jpg ni webp`)
-      continue
-    }
-    if (f.size > MAX_MB_APORTADA * 1024 * 1024) {
-      avisos.push(`${f.name}: pesa más de ${MAX_MB_APORTADA} MB`)
-      continue
-    }
-    entradas.push({ nombre: f.name, datos: await leer_como_data_url(f) })
-  }
-  if (!entradas.length) return { imagenes: [], avisos }
-  const r = await api.post<RespuestaAportadas>("/api/presets-light/imagenes", {
-    imagenes: entradas,
-  })
-  return { imagenes: r.imagenes, avisos: [...avisos, ...r.avisos] }
-}
-
-/** Zona de arrastre + miniaturas con su quitar. La fuente de la guía. */
-function KitVisual({
-  imagenes,
-  url,
-  tope,
-  subiendo,
-  alElegir,
-  alQuitar,
-}: {
-  imagenes: { nombre: string; origen?: string }[]
-  url: (nombre: string) => string
-  tope: number
-  subiendo: boolean
-  alElegir: (ficheros: FileList | File[]) => void
-  alQuitar: (nombre: string) => void
-}) {
-  const [arrastrando, setArrastrando] = useState(false)
-  const entrada = useRef<HTMLInputElement>(null)
-  return (
-    <div className="space-y-2">
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => entrada.current?.click()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") entrada.current?.click()
-        }}
-        onDragOver={(e) => {
-          e.preventDefault()
-          setArrastrando(true)
-        }}
-        onDragLeave={() => setArrastrando(false)}
-        onDrop={(e) => {
-          e.preventDefault()
-          setArrastrando(false)
-          if (e.dataTransfer.files.length) alElegir(e.dataTransfer.files)
-        }}
-        className={`cursor-pointer rounded-md border border-dashed px-3 py-4 text-center text-xs transition-colors ${
-          arrastrando
-            ? "border-primary bg-primary/5 text-foreground"
-            : "text-muted-foreground"
-        }`}
-      >
-        {subiendo ? (
-          <Loader2 className="mx-auto h-4 w-4 animate-spin" />
-        ) : (
-          <>
-            <ImagePlus className="mx-auto mb-1 h-4 w-4" />
-            <p>
-              suelta aquí tu kit visual o haz clic: png · jpg · webp, hasta{" "}
-              {MAX_MB_APORTADA} MB por imagen
-            </p>
-          </>
-        )}
-        <input
-          ref={entrada}
-          type="file"
-          accept={EXT_APORTADAS.join(",")}
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files?.length) alElegir(e.target.files)
-            e.target.value = ""
-          }}
-        />
-      </div>
-      {imagenes.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          {imagenes.map((i) => (
-            <div key={i.nombre} className="group relative">
-              <img
-                src={url(i.nombre)}
-                alt={i.origen ?? i.nombre}
-                title={i.origen ?? i.nombre}
-                className="h-16 w-16 rounded-md border object-cover"
-              />
-              <button
-                type="button"
-                onClick={() => alQuitar(i.nombre)}
-                title="quitar"
-                className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border bg-background shadow-sm"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          ))}
-          <p className="text-xs text-muted-foreground">
-            {imagenes.length}/{tope}
-          </p>
-        </div>
-      )}
-    </div>
-  )
+  return subir_imagenes("/api/presets-light/imagenes", ficheros, ya, tope)
 }
 
 export default function Light({ alCambiar }: { alCambiar?: () => void }) {
@@ -278,7 +145,7 @@ export default function Light({ alCambiar }: { alCambiar?: () => void }) {
   const al_elegir_imagenes = async (ficheros: FileList | File[]) => {
     setSubiendo(true)
     try {
-      const r = await subir_imagenes(ficheros, imagenes.length, tope)
+      const r = await subir_al_buzon(ficheros, imagenes.length, tope)
       if (r.imagenes.length) setImagenes((prev) => [...prev, ...r.imagenes])
       r.avisos.forEach((a) => toast.warning(a))
     } catch (e) {
@@ -681,7 +548,7 @@ function DialogoCanal({
   const al_elegir_material = async (ficheros: FileList | File[]) => {
     setSubiendo(true)
     try {
-      const r = await subir_imagenes(
+      const r = await subir_al_buzon(
         ficheros,
         nuevas.length + (ficha?.estilo_imagenes.length ?? 0),
         ficha?.max_imagenes_estilo ?? 24,
