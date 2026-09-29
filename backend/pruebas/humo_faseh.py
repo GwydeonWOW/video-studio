@@ -192,7 +192,7 @@ check("GET presets-light", r.status_code == 200
       and len(ficha["ritmos"]) == 5
       and ficha["ritmo_defecto"] == "medio"
       and ficha["plan"]["tareas"]
-      and ficha["hay_openai"] is False
+      and ficha["hay_glm"] is False
       and ficha["hay_elevenlabs"] is False)
 
 encargo = {"nombre": "Canal de Prueba",

@@ -26,8 +26,10 @@ TARIFAS_DEFECTO = {
     "glm/tokens": [0.60, 2.20],           # glm-4.6 aprox
     "openai/tokens": [1.25, 10.00],       # gpt-5-mini aprox
     "anthropic/tokens": [3.00, 15.00],    # sonnet-4.5 aprox
-    # Imagenes: dolares por imagen gpt-image-1 segun calidad
-    "openai/imagen": {"low": 0.011, "medium": 0.042, "high": 0.167},
+    # Codex va con la suscripcion de ChatGPT: no se factura por token
+    "codex/tokens": [0.0, 0.0],
+    # Imagenes: glm-image, precio plano por imagen
+    "glm/imagen": {"low": 0.015, "medium": 0.015, "high": 0.015},
     # Voz: dolar por 1000 caracteres (aprox once_multilingual)
     "elevenlabs/voz": 0.15,
     "elevenlabs/voz_flash": 0.05,

@@ -19,7 +19,7 @@ deriva se congela y la heredan todas las imágenes. Por eso:
 
 Diferencia honesta: el motor de imagen de esta réplica no adjunta
 referencias en cada plano (prompt compuesto, documentado en
-motores/imagen_openai.py), así que el moodboard aquí es la hoja de
+motores/imagen_glm.py), así que el moodboard aquí es la hoja de
 comprobación visual del estilo — lo que se mira para decidir si la
 guía está bien — y no un adjunto que viaja en cada llamada.
 
@@ -207,7 +207,7 @@ def generar(clave: str, ficha_guia: dict, ejes=None, peticiones=None,
     vez por estilo, así que ahorrar aquí es ahorrar en el sitio
     equivocado.
     """
-    from ..motores import imagen_openai
+    from ..motores import imagen_glm
 
     avisar = avisar or (lambda *_: None)
     clave = str(clave or "")
@@ -219,9 +219,9 @@ def generar(clave: str, ficha_guia: dict, ejes=None, peticiones=None,
         raise ValueError("no hay ningún eje que dibujar")
     peticiones = peticiones or {}
     claves = comun.claves_actuales()
-    if not imagen_openai.clave(claves):
-        raise imagen_openai.ErrorImagen(
-            "falta la clave de OpenAI para imágenes (Configuración -> claves)")
+    if not imagen_glm.clave(claves):
+        raise imagen_glm.ErrorImagen(
+            "falta la clave de GLM para imágenes (Configuración -> claves)")
 
     carpeta = raiz_propuestas() / clave
     carpeta.mkdir(parents=True, exist_ok=True)
@@ -234,10 +234,10 @@ def generar(clave: str, ficha_guia: dict, ejes=None, peticiones=None,
     for numero, eje in enumerate(pedidos, start=1):
         destino = carpeta / f"{eje}.png"
         prompt = prompt_de_eje(eje, ficha_guia, peticiones.get(eje))
-        imagen_openai.generar(prompt, destino, calidad=calidad, claves=claves)
+        imagen_glm.generar(prompt, destino, calidad=calidad, claves=claves)
         anotar_operacion(
             datos_dir=AJUSTES.datos, proyecto=proyecto_id or "__estilo",
-            operacion="imagen", proveedor="openai", modelo="gpt-image-1",
+            operacion="imagen", proveedor="glm", modelo="glm-image",
             calidad=calidad, contexto=f"moodboard:{eje}", proyecto_dir=None)
         hechos.append(eje)
         if peticiones.get(eje):
@@ -248,7 +248,7 @@ def generar(clave: str, ficha_guia: dict, ejes=None, peticiones=None,
     # guarda el orientativo para que la pantalla lo enseñe
     ficha["coste_usd"] = round(float(ficha.get("coste_usd") or 0.0)
                                + len(hechos)
-                               * comun.COSTE_IMAGEN.get(calidad, 0.042), 4)
+                               * comun.COSTE_IMAGEN.get(calidad, 0.015), 4)
     ficha["estado"] = "propuesto"
     _escribir(carpeta / "ficha.json", ficha)
     avisar(f"{len(hechos)} referencia(s) dibujadas como propuesta")

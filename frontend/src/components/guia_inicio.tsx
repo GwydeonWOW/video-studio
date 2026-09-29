@@ -100,21 +100,23 @@ const TARJETAS_CLAVE: {
 }[] = [
   {
     id: "glm",
-    titulo: "1 · La clave de GLM (textos)",
+    titulo: "1 · La clave de GLM (textos e imágenes)",
     pista: (
       <>
-        Escribe el guion, corrige escenas, redacta los rótulos y contesta al
-        asistente de la burbuja. Se saca de <Enlace href="https://z.ai">z.ai</Enlace>{" "}
-        (API de GLM).
+        Escribe el guion, corrige escenas, redacta los rótulos, contesta al
+        asistente de la burbuja y dibuja los planos del vídeo. Se saca de{" "}
+        <Enlace href="https://z.ai">z.ai</Enlace> (API de GLM).
       </>
     ),
   },
   {
     id: "openai",
-    titulo: "2 · La clave de OpenAI (imágenes)",
+    titulo: "2 · La clave de OpenAI (textos, opcional)",
     pista: (
       <>
-        Con ella se dibujan los planos del vídeo. Se saca de{" "}
+        Solo si prefieres GPT para los textos: las imágenes ya las dibuja
+        GLM. También hay un tercer camino sin clave —conectar la cuenta de
+        ChatGPT (Codex) desde Configuración. Se saca de{" "}
         <Enlace href="https://platform.openai.com/api-keys">
           platform.openai.com
         </Enlace>
@@ -242,18 +244,21 @@ export function GuiaInicio({ alCerrar }: { alCerrar: () => void }) {
               </p>
               <ol className="list-decimal space-y-1 pl-5">
                 <li>
-                  <b>GLM</b>: el guion, los rótulos y el asistente de la
-                  burbuja.
+                  <b>GLM</b>: el guion, los rótulos, el asistente de la
+                  burbuja y los planos dibujados.
                 </li>
                 <li>
-                  <b>OpenAI</b>: con ella se dibujan los planos.
+                  <b>OpenAI</b>: opcional, GPT para los textos si no usas
+                  GLM. Y sin clave ninguna también se pueden escribir los
+                  textos con la cuenta de ChatGPT (<b>Codex</b>): se conecta
+                  desde Configuración con un código en el navegador.
                 </li>
                 <li>
                   <b>ElevenLabs</b>: la voz que narra.
                 </li>
                 <li>
-                  <b>Jamendo y FreeSound</b>: música y efectos. Son las dos
-                  únicas que se pueden dejar para luego; las otras tres hacen
+                  <b>Jamendo y FreeSound</b>: música y efectos. Se pueden
+                  dejar para luego; GLM y ElevenLabs son las que hacen
                   falta.
                 </li>
               </ol>
@@ -288,16 +293,16 @@ export function GuiaInicio({ alCerrar }: { alCerrar: () => void }) {
           {ultima && (() => {
             const presente = (id: string) =>
               !!claves?.find((c) => c.clave === id)?.presente
-            const imprescindibles = ["glm", "openai", "elevenlabs"].filter(
+            const imprescindibles = ["glm", "elevenlabs"].filter(
               (id) => !presente(id),
             )
             return (
               <div className="space-y-3">
                 <h2 className="text-lg font-semibold">Todo listo</h2>
                 {[
-                  { id: "glm", nombre: "GLM — guion, rótulos y el asistente" },
-                  { id: "openai", nombre: "OpenAI — imágenes" },
+                  { id: "glm", nombre: "GLM — guion, rótulos, imágenes y el asistente" },
                   { id: "elevenlabs", nombre: "ElevenLabs — voz" },
+                  { id: "openai", nombre: "OpenAI — textos (opcional)", opcional: true },
                   { id: "jamendo", nombre: "Jamendo — música", opcional: true },
                   { id: "freesound", nombre: "FreeSound — efectos", opcional: true },
                 ].map((f) => (
@@ -317,10 +322,10 @@ export function GuiaInicio({ alCerrar }: { alCerrar: () => void }) {
                 ))}
                 {imprescindibles.length > 0 ? (
                   <p className="rounded-md border border-amber-300/60 bg-amber-100/60 p-3 text-sm dark:bg-amber-950/40">
-                    Faltan {imprescindibles.length} de las tres que hacen falta
-                    para un vídeo (GLM, OpenAI y ElevenLabs). Sin ellas no
-                    sale el vídeo entero: se ponen desde Configuración, arriba
-                    a la derecha.
+                    Faltan {imprescindibles.length} de las dos que hacen falta
+                    para un vídeo (GLM y ElevenLabs). Sin ellas no sale el
+                    vídeo entero: se ponen desde Configuración, arriba a la
+                    derecha.
                   </p>
                 ) : (
                   <p className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">

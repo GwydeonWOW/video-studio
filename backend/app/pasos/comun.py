@@ -29,7 +29,7 @@ def ajustes_llm() -> dict:
 #: Precio orientativo de cada llamada para la estimacion PREVIA de la
 #: pantalla. El coste real lo apunta el medidor al ejecutar.
 COSTE_LLAMADA_LLAM = {"glm": 0.004, "openai": 0.008, "anthropic": 0.02}
-COSTE_IMAGEN = {"low": 0.011, "medium": 0.042, "high": 0.167}
+COSTE_IMAGEN = {"low": 0.015, "medium": 0.015, "high": 0.015}
 #: caracteres de voz por dolar (aprox.)
 CARACTERES_POR_DOLAR = 6667
 

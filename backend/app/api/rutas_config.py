@@ -64,6 +64,45 @@ def probar() -> dict:
     return probar_claves(AJUSTES.carpeta_claves)
 
 
+# ------------------------------------------------------------ codex (OAuth)
+
+@router.get("/codex", dependencies=[_SESION])
+def codex_estado() -> dict:
+    """La sesion de ChatGPT para textos: conectada, quien y hasta cuando."""
+    from ..motores import codex_oauth
+    return codex_oauth.estado(AJUSTES.carpeta_claves)
+
+
+@router.post("/codex/conectar", dependencies=_MUTAR)
+def codex_conectar() -> dict:
+    """Arranca el flujo de dispositivo: devuelve lo que hay que mostrar."""
+    from ..motores import codex_oauth
+    try:
+        return codex_oauth.iniciar(AJUSTES.carpeta_claves)
+    except codex_oauth.ErrorCodex as fallo:
+        raise HTTPException(502, str(fallo)) from fallo
+
+
+@router.post("/codex/sondeo", dependencies=_MUTAR)
+def codex_sondeo() -> dict:
+    """Una vuelta de polling del flujo (pendiente | conectado | ...)."""
+    from ..motores import codex_oauth
+    try:
+        return codex_oauth.sondear(AJUSTES.carpeta_claves)
+    except codex_oauth.ErrorCodex as fallo:
+        raise HTTPException(502, str(fallo)) from fallo
+
+
+@router.delete("/codex", dependencies=_MUTAR)
+def codex_desconectar() -> dict:
+    """Borra la sesion local de la cuenta ChatGPT."""
+    from ..motores import codex_oauth
+    try:
+        return codex_oauth.desconectar(AJUSTES.carpeta_claves)
+    except codex_oauth.ErrorCodex as fallo:
+        raise HTTPException(502, str(fallo)) from fallo
+
+
 # ------------------------------------------------------- modelos por rol
 
 @router.get("/proveedores", dependencies=[_SESION])

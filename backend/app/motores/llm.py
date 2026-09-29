@@ -57,7 +57,24 @@ PROVEEDORES = {
         "defecto": "claude-sonnet-5",
         "variable": "ESTUDIO_ANTHROPIC_KEY",
     },
+    "codex": {
+        "nombre": "Codex (cuenta ChatGPT)",
+        "esquema": "codex",
+        "base": "https://chatgpt.com/backend-api/codex",
+        "modelos": ["gpt-5.2-codex", "gpt-5.2-codex-mini",
+                    "gpt-5.1-codex-max", "gpt-5.1-codex"],
+        "defecto": "gpt-5.2-codex",
+        # sin clave: la sesion OAuth vive en secretos/codex.json (ver
+        # codex_oauth.py); la variable solo inyecta un token en dev
+        "variable": "ESTUDIO_CODEX_TOKEN",
+    },
 }
+
+#: Los modelos de codex salen mas rapido que las releases de esto: se
+#: estiran por entorno (ESTUDIO_CODEX_MODELOS, separados por coma).
+PROVEEDORES["codex"]["modelos"] = [
+    m.strip() for m in os.environ.get("ESTUDIO_CODEX_MODELOS", "").split(",")
+    if m.strip()] + PROVEEDORES["codex"]["modelos"]
 
 #: Papeles del producto y a que proveedor/modelo van por defecto. Se
 #: sobreescribe desde la configuracion (api/ajustes) sin tocar esto.
@@ -96,11 +113,44 @@ class Llamada:
 
 
 def clave_de(proveedor: str, claves: dict | None = None) -> str:
-    """API key del proveedor: argumento, entorno o fichero de claves."""
+    """Credencial del proveedor: argumento, entorno o fichero de claves.
+
+    «codex» no tiene clave: su token OAuth se refresca al pedirlo.
+    """
+    if proveedor == "codex":
+        if claves and claves.get("codex"):
+            return str(claves["codex"])
+        return _token_codex()
     if claves and claves.get(proveedor):
         return str(claves[proveedor])
     variable = PROVEEDORES[proveedor]["variable"]
     return os.environ.get(variable, "")
+
+
+def _token_codex() -> str:
+    """Token de codex fresco (refresca si caduca pronto)."""
+    from ..config import AJUSTES
+    from . import codex_oauth
+    try:
+        return codex_oauth.token_actual(AJUSTES.carpeta_claves)
+    except codex_oauth.ErrorCodex as fallo:
+        raise ErrorLLM(f"codex: {fallo}") from fallo
+
+
+def _cabeceras_codex(clave: str) -> dict:
+    """Cabeceras que el backend de Codex espera de un cliente CLI."""
+    from ..config import AJUSTES
+    from . import codex_oauth
+    cabeceras = {
+        "Authorization": f"Bearer {clave}",
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "responses=experimental",
+        "originator": "codex_cli_rs",
+    }
+    cuenta = codex_oauth.cuenta_actual(AJUSTES.carpeta_claves)
+    if cuenta:
+        cabeceras["chatgpt-account-id"] = cuenta
+    return cabeceras
 
 
 def _esquema_de(proveedor: str) -> str:
@@ -123,16 +173,34 @@ def llamar(llamada: Llamada, claves: dict | None = None,
     """
     clave = clave_de(llamada.proveedor, claves)
     if not clave:
+        if llamada.proveedor == "codex":
+            raise ErrorLLM("falta la sesion de Codex: conecta la cuenta "
+                           "ChatGPT en Configuracion -> Claves")
         raise ErrorLLM(f"falta la clave del proveedor '{llamada.proveedor}' "
                        f"({PROVEEDORES[llamada.proveedor]['variable']})")
     esquema = _esquema_de(llamada.proveedor)
     base = _base_de(llamada.proveedor, ajustes_proveedor)
-    url = (f"{base}/chat/completions" if esquema == "openai"
-           else f"{base}/messages")
+    url = f"{base}" + {"openai": "/chat/completions",
+                       "anthropic": "/messages",
+                       "codex": "/responses"}[esquema]
     cabeceras = {"Content-Type": "application/json"}
     cuerpo: dict = {}
 
-    if esquema == "openai":
+    if esquema == "codex":
+        # Responses API del backend de Codex. Sin temperature ni
+        # max_tokens: ese backend rechaza los parametros clasicos y el
+        # tamaño lo gobierna el propio modelo.
+        cabeceras = _cabeceras_codex(clave)
+        cuerpo = {
+            "model": llamada.modelo,
+            "instructions": llamada.sistema or "",
+            "input": [{"role": "user",
+                       "content": [{"type": "input_text",
+                                    "text": llamada.instruccion}]}],
+            "stream": True,
+            "store": False,
+        }
+    elif esquema == "openai":
         cabeceras["Authorization"] = f"Bearer {clave}"
         mensajes = []
         if llamada.sistema:
@@ -154,13 +222,14 @@ def llamar(llamada: Llamada, claves: dict | None = None,
     ultimo_error = ""
     for intento in range(1, INTENTOS + 1):
         try:
-            respuesta = requests.post(url, headers=cabeceras,
-                                      json=cuerpo, timeout=TIEMPO_FUERA_S)
+            respuesta = requests.post(url, headers=cabeceras, json=cuerpo,
+                                      timeout=TIEMPO_FUERA_S,
+                                      stream=(esquema == "codex"))
         except requests.RequestException as fallo:
             ultimo_error = f"red: {fallo}"
         else:
             if respuesta.status_code == 200:
-                texto, uso = _extraer(respuesta.json(), esquema)
+                texto, uso = _extraer(_cuerpo_de(respuesta, esquema), esquema)
                 _apuntar(llamada, uso)
                 return texto
             if respuesta.status_code in (401, 403, 404):
@@ -187,10 +256,45 @@ def llamar(llamada: Llamada, claves: dict | None = None,
                    f"{ultimo_error}")
 
 
+def _cuerpo_de(respuesta, esquema: str) -> dict:
+    """El JSON final de la respuesta. El SSE de codex se drena hasta
+    response.completed (lo unico que hace falta: el texto ya completo)."""
+    if esquema != "codex":
+        return respuesta.json()
+    if not (respuesta.headers.get("content-type") or
+            "").startswith("text/event-stream"):
+        return respuesta.json()
+    for linea in respuesta.iter_lines(decode_unicode=True):
+        if not linea or not linea.startswith("data:"):
+            continue
+        bruto = linea[len("data:"):].strip()
+        if bruto == "[DONE]":
+            break
+        try:
+            evento = json.loads(bruto)
+        except ValueError:
+            continue
+        if evento.get("type") == "response.completed":
+            return evento.get("response") or {}
+    raise ErrorLLM("codex cerro el flujo sin respuesta completa")
+
+
 def _extraer(cuerpo: dict, esquema: str) -> tuple[str, dict]:
     """Texto de la respuesta + uso de tokens (para el medidor de coste)."""
     try:
-        if esquema == "openai":
+        if esquema == "codex":
+            # Responses API: la salida es una lista de piezas; el texto
+            # vive en los bloques output_text de los mensajes
+            textos = []
+            for pieza in cuerpo.get("output") or []:
+                if pieza.get("type") != "message":
+                    continue
+                for bloque in pieza.get("content") or []:
+                    if bloque.get("type") in ("output_text", "text"):
+                        textos.append(str(bloque.get("text") or ""))
+            texto = "".join(textos).strip()
+            uso = cuerpo.get("usage", {}) or {}
+        elif esquema == "openai":
             texto = (cuerpo["choices"][0]["message"]["content"] or "").strip()
             uso = cuerpo.get("usage", {}) or {}
         else:
@@ -283,6 +387,14 @@ def probar(proveedor: str, claves: dict | None = None) -> dict:
     if not clave:
         return {"ok": False, "detalle": "sin clave"}
     try:
+        if proveedor == "codex":
+            # el backend de codex no lista modelos: se preguntan dos
+            # palabras (gasta unos tokens de la suscripcion, nada mas)
+            texto = llamar(Llamada(
+                proveedor="codex", modelo=PROVEEDORES["codex"]["defecto"],
+                sistema="Contesta con una sola palabra.", instruccion="Di: ok",
+            ), claves)
+            return {"ok": True, "detalle": texto.strip()[:40] or "sesion valida"}
         if _esquema_de(proveedor) == "openai":
             url = f"{_base_de(proveedor)}/models"
             respuesta = requests.get(url, headers={"Authorization": f"Bearer {clave}"},
@@ -297,6 +409,8 @@ def probar(proveedor: str, claves: dict | None = None) -> dict:
             return {"ok": True, "detalle": "clave valida"}
         return {"ok": False,
                 "detalle": f"{respuesta.status_code}: {respuesta.text[:200]}"}
+    except ErrorLLM as fallo:
+        return {"ok": False, "detalle": str(fallo)[:200]}
     except requests.RequestException as fallo:
         return {"ok": False, "detalle": f"red: {fallo}"}
 
@@ -342,15 +456,36 @@ def llamar_conversacion(llamada: Llamada, mensajes: list[dict],
     """
     clave = clave_de(llamada.proveedor, claves)
     if not clave:
+        if llamada.proveedor == "codex":
+            raise ErrorLLM("falta la sesion de Codex: conecta la cuenta "
+                           "ChatGPT en Configuracion -> Claves")
         raise ErrorLLM(f"falta la clave del proveedor '{llamada.proveedor}' "
                        f"({PROVEEDORES[llamada.proveedor]['variable']})")
     esquema = _esquema_de(llamada.proveedor)
     base = _base_de(llamada.proveedor, ajustes_proveedor)
-    url = (f"{base}/chat/completions" if esquema == "openai"
-           else f"{base}/messages")
+    url = f"{base}" + {"openai": "/chat/completions",
+                       "anthropic": "/messages",
+                       "codex": "/responses"}[esquema]
     cabeceras = {"Content-Type": "application/json"}
 
-    if esquema == "openai":
+    if esquema == "codex":
+        cabeceras = _cabeceras_codex(clave)
+        cuerpo: dict = {
+            "model": llamada.modelo,
+            "instructions": llamada.sistema or "",
+            "input": _abrir_mensajes(mensajes, "", esquema),
+            "stream": True,
+            "store": False,
+        }
+        if herramientas:
+            # responses: la funcion va PLANA (no anidada como en chat)
+            cuerpo["tools"] = [
+                {"type": "function", "name": h["nombre"],
+                 "description": h.get("descripcion", ""),
+                 "parameters": h.get("parametros",
+                                     {"type": "object", "properties": {}})}
+                for h in herramientas]
+    elif esquema == "openai":
         cabeceras["Authorization"] = f"Bearer {clave}"
         cuerpo: dict = {"model": llamada.modelo,
                         "messages": _abrir_mensajes(mensajes,
@@ -388,13 +523,14 @@ def llamar_conversacion(llamada: Llamada, mensajes: list[dict],
     ultimo_error = ""
     for intento in range(1, INTENTOS + 1):
         try:
-            respuesta = requests.post(url, headers=cabeceras,
-                                      json=cuerpo, timeout=TIEMPO_FUERA_S)
+            respuesta = requests.post(url, headers=cabeceras, json=cuerpo,
+                                      timeout=TIEMPO_FUERA_S,
+                                      stream=(esquema == "codex"))
         except requests.RequestException as fallo:
             ultimo_error = f"red: {fallo}"
         else:
             if respuesta.status_code == 200:
-                crudo = respuesta.json()
+                crudo = _cuerpo_de(respuesta, esquema)
                 texto, llamadas, uso = _extraer_conversacion(crudo, esquema)
                 _apuntar(llamada, uso)
                 return {"texto": texto, "llamadas": llamadas, "uso": uso}
@@ -435,6 +571,23 @@ def _abrir_mensajes(mensajes: list[dict], sistema: str, esquema: str) -> list:
                                       ensure_ascii=False)}}
                     for h in llamadas]
             salida.append(m)
+        elif esquema == "codex":
+            if rol == "user" and resultados:
+                for resultado in resultados:
+                    salida.append({"type": "function_call_output",
+                                   "call_id": resultado.get("id"),
+                                   "output": resultado.get("texto", "")})
+                continue
+            if texto:
+                salida.append({
+                    "role": "user" if rol == "user" else "assistant",
+                    "content": [{"type": "input_text" if rol == "user"
+                                 else "output_text", "text": texto}]})
+            salida.extend({"type": "function_call",
+                           "call_id": h.get("id"), "name": h.get("nombre"),
+                           "arguments": json.dumps(h.get("argumentos") or {},
+                                                   ensure_ascii=False)}
+                          for h in llamadas)
         else:  # anthropic
             if rol == "user" and resultados:
                 salida.append({"role": "user", "content": [
@@ -475,7 +628,25 @@ def _extraer_conversacion(crudo: dict, esquema: str) -> tuple[str, list, dict]:
                                  "nombre": funcion.get("name"),
                                  "argumentos": argumentos})
             uso = crudo.get("usage", {}) or {}
-        else:
+        elif esquema == "codex":
+            texto = ""
+            llamadas = []
+            for item in crudo.get("output", []) or []:
+                if item.get("type") == "message":
+                    for bloque in item.get("content") or []:
+                        if bloque.get("type") in ("output_text", "text"):
+                            texto += str(bloque.get("text") or "")
+                elif item.get("type") == "function_call":
+                    bruto = item.get("arguments") or "{}"
+                    try:
+                        argumentos = json.loads(bruto)
+                    except ValueError:
+                        argumentos = {"_bruto": bruto[:2000]}
+                    llamadas.append({"id": item.get("call_id"),
+                                     "nombre": item.get("name"),
+                                     "argumentos": argumentos})
+            uso = crudo.get("usage", {}) or {}
+        else:  # anthropic
             bloques = crudo.get("content", []) or []
             texto = "".join(b.get("text", "") for b in bloques
                             if b.get("type") == "text")

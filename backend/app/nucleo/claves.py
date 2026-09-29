@@ -8,9 +8,13 @@ Formato de claves.json:
 
     {
       "llm":        {"glm": "...", "openai": "...", "anthropic": "..."},
-      "openai":     "...",        // imagenes (misma clave de OpenAI)
+      "openai":     "...",        // gpt para textos (opcional; imagenes van con glm)
       "elevenlabs": "..."
     }
+
+Codex no aparece ahi: no es una clave pegable sino una sesion OAuth
+(`secretos/codex.json`, motores/codex_oauth.py) que se conecta con la
+cuenta de ChatGPT desde Configuracion.
 """
 from __future__ import annotations
 
@@ -25,8 +29,8 @@ except ImportError:
 
 #: (clave interna, etiqueta humana, variable de entorno, para_que)
 CATALOGO = [
-    ("glm", "GLM (z.ai)", "ESTUDIO_GL_KEY", "guion y textos"),
-    ("openai", "OpenAI", "ESTUDIO_OPENAI_KEY", "gpt + imagenes"),
+    ("glm", "GLM (z.ai)", "ESTUDIO_GL_KEY", "guion, textos e imagenes"),
+    ("openai", "OpenAI", "ESTUDIO_OPENAI_KEY", "gpt textos (opcional)"),
     ("anthropic", "Anthropic", "ESTUDIO_ANTHROPIC_KEY", "claude (opcional)"),
     ("elevenlabs", "ElevenLabs", "ESTUDIO_ELEVENLABS_KEY", "voz"),
     ("jamendo", "Jamendo", "ESTUDIO_JAMENDO_ID", "musica de fondo"),
@@ -90,7 +94,13 @@ def guardar_claves(carpeta: Path | str, nuevas: dict[str, str]) -> None:
 
 
 def enmascaradas(carpeta: Path | str) -> list[dict]:
-    """Estado de cada clave para la pantalla (sin el valor)."""
+    """Estado de cada clave para la pantalla (sin el valor).
+
+    Codex va DETRAS de GLM y no es una clave: es la sesion OAuth de la
+    cuenta ChatGPT (motores/codex_oauth.py), asi que su fila enseña el
+    correo y si sigue conectada — y su "variable" es la ruta de las
+    APIs de conectar/desconectar, no un nombre de entorno.
+    """
     claves = leer_claves(carpeta)
     lista = []
     for clave, etiqueta, variable, uso in CATALOGO:
@@ -102,6 +112,19 @@ def enmascaradas(carpeta: Path | str) -> list[dict]:
             "mascara": f"...{valor[-4:]}" if len(valor) >= 8 else
                        ("****" if valor else ""),
         })
+        if clave == "glm":
+            try:
+                from ..motores import codex_oauth
+                sesion = codex_oauth.estado(carpeta)
+            except Exception:
+                sesion = {"conectado": False, "correo": ""}
+            lista.append({
+                "clave": "codex", "etiqueta": "Codex (cuenta ChatGPT)",
+                "uso": "textos con la sesion de ChatGPT",
+                "variable": "/api/codex",
+                "presente": bool(sesion.get("conectado")),
+                "mascara": str(sesion.get("correo") or ""),
+            })
     return lista
 
 
@@ -125,6 +148,20 @@ def probar_claves(carpeta: Path | str) -> dict:
                                  "detalle": f"{r.status_code}"}
         except requests.RequestException as e:
             resultados["glm"] = {"ok": False, "detalle": f"red: {e}"}
+    # codex: sesion OAuth, no clave — se prueba con una pregunta de dos
+    # palabras contra la cuenta conectada
+    try:
+        from ..motores import codex_oauth
+        from ..motores import llm as _llm
+        if codex_oauth.estado(carpeta).get("conectado") or \
+                os.environ.get("ESTUDIO_CODEX_TOKEN"):
+            resultados["codex"] = _llm.probar("codex", claves)
+        else:
+            resultados["codex"] = {
+                "ok": False,
+                "detalle": "sin sesion: se conecta con el boton, no es una clave"}
+    except Exception as e:  # ErrorCodex, ErrorLLM, red
+        resultados["codex"] = {"ok": False, "detalle": str(e)[:200]}
     if claves.get("openai"):
         try:
             r = requests.get("https://api.openai.com/v1/models",

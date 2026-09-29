@@ -156,12 +156,12 @@ export default function Light({ alCambiar }: { alCambiar?: () => void }) {
 
   return (
     <div className="space-y-8">
-      {(!ficha.hay_openai || !ficha.hay_elevenlabs) && (
+      {(!ficha.hay_glm || !ficha.hay_elevenlabs) && (
         <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
           <p>
-            Faltan claves ({!ficha.hay_openai && "OpenAI"}
-            {!ficha.hay_openai && !ficha.hay_elevenlabs && " y "}
+            Faltan claves ({!ficha.hay_glm && "GLM"}
+            {!ficha.hay_glm && !ficha.hay_elevenlabs && " y "}
             {!ficha.hay_elevenlabs && "ElevenLabs"}): el canal no puede
             generarse.{" "}
             <Link to="/config" className="underline underline-offset-2">

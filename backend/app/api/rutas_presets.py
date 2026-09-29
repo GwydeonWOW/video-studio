@@ -560,7 +560,7 @@ def ficha_light() -> dict:
         "plan": presets_light.plan_de({}),
         "presets": presets_canal.listar()["presets"]["canal"],
         "papelera": presets_canal.listar()["papelera"],
-        "hay_openai": bool(claves.get("openai")),
+        "hay_glm": bool(claves.get("glm")),
         "hay_elevenlabs": bool(voz_elevenlabs.clave(claves)),
     }
 

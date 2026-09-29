@@ -1,12 +1,25 @@
 /** Configuración del servicio: claves, modelos por rol, voces, tarifas y coste. */
 import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
-import { BookOpen, Check, Copy, KeyRound, Loader2, Mic2, Save } from "lucide-react"
+import {
+  BookOpen,
+  Check,
+  Copy,
+  ExternalLink,
+  KeyRound,
+  Loader2,
+  LogIn,
+  LogOut,
+  Mic2,
+  Save,
+} from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
 import type {
   CatalogoProveedores,
   ClaveEstado,
+  CodexFlujo,
+  CodexSondeo,
   CosteTotal,
   Estadisticas,
   Voz,
@@ -18,6 +31,13 @@ import { Insignia } from "../components/ui/badge"
 import { Entrada } from "../components/ui/input"
 import { Etiqueta } from "../components/ui/etiqueta"
 import { Tarjeta, ContenidoTarjeta } from "../components/ui/tarjeta"
+import {
+  Dialogo,
+  ContenidoDialogo,
+  CabeceraDialogo,
+  TituloDialogo,
+  DescripcionDialogo,
+} from "../components/ui/dialogo"
 import {
   Selector,
   DisparadorSelector,
@@ -129,6 +149,13 @@ function PestanaClaves() {
       .catch(() => setLista([]))
   }, [])
 
+  const recargar = useCallback(() => {
+    api
+      .get<ClaveEstado[]>("/api/claves")
+      .then(setLista)
+      .catch(() => {})
+  }, [])
+
   const guardar = async () => {
     const cuerpo: Record<string, string> = {}
     for (const [clave, valor] of Object.entries(valores))
@@ -179,6 +206,8 @@ function PestanaClaves() {
       </p>
       {lista.map((c) => {
         const prueba = pruebas?.[c.clave]
+        if (c.clave === "codex")
+          return <FilaCodex key={c.clave} estado={c} alCambiar={recargar} />
         return (
           <div key={c.clave} className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
@@ -225,6 +254,165 @@ function PestanaClaves() {
           Probar claves
         </Boton>
       </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------- codex (OAuth) */
+
+function FilaCodex({
+  estado,
+  alCambiar,
+}: {
+  estado: ClaveEstado
+  alCambiar: () => void
+}) {
+  const [flujo, setFlujo] = useState<CodexFlujo | null>(null)
+  const [conectando, setConectando] = useState(false)
+  const [copiado, setCopiado] = useState(false)
+
+  const conectar = async () => {
+    setConectando(true)
+    try {
+      setFlujo(await api.post<CodexFlujo>("/api/codex/conectar"))
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setConectando(false)
+    }
+  }
+
+  const desconectar = async () => {
+    try {
+      await api.borrar("/api/codex")
+      toast.success("sesión de ChatGPT desconectada")
+      alCambiar()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  // Mientras el diálogo está abierto se pregunta al servidor cada
+  // intervalo_s si la cuenta ya se confirmó en el navegador.
+  useEffect(() => {
+    if (!flujo) return
+    let vivo = true
+    const id = setInterval(async () => {
+      try {
+        const s = await api.post<CodexSondeo>("/api/codex/sondeo")
+        if (!vivo) return
+        if (s.estado === "conectado") {
+          setFlujo(null)
+          toast.success(
+            s.correo ? `cuenta conectada: ${s.correo}` : "cuenta conectada",
+          )
+          alCambiar()
+        } else if (s.estado === "expirado" || s.estado === "rechazado") {
+          setFlujo(null)
+          toast.error(
+            s.estado === "expirado"
+              ? "el código caducó: vuelve a conectar"
+              : "conexión rechazada en el navegador",
+          )
+        }
+      } catch (e) {
+        if (!vivo) return
+        setFlujo(null)
+        toast.error(String((e as Error).message ?? e))
+      }
+    }, flujo.intervalo_s * 1000)
+    return () => {
+      vivo = false
+      clearInterval(id)
+    }
+  }, [flujo, alCambiar])
+
+  const copiar = async () => {
+    if (!flujo) return
+    try {
+      await navigator.clipboard.writeText(flujo.user_code)
+      setCopiado(true)
+      setTimeout(() => setCopiado(false), 1500)
+    } catch {
+      toast.error("no se pudo copiar")
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Etiqueta>{estado.etiqueta}</Etiqueta>
+        {estado.presente ? (
+          <Insignia variante="exito">
+            {estado.mascara || "conectada"}
+          </Insignia>
+        ) : (
+          <Insignia variante="secundario">sin sesión</Insignia>
+        )}
+        {estado.presente && (
+          <Boton
+            variante="contorno"
+            tamano="pequeno"
+            onClick={desconectar}
+            title="Borra la sesión local del servidor"
+          >
+            <LogOut /> Desconectar
+          </Boton>
+        )}
+      </div>
+      {!estado.presente && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            {estado.uso}. No es una clave pegable: se conecta con la
+            cuenta de ChatGPT y el código se confirma en el navegador.
+          </p>
+          <Boton onClick={conectar} deshabilitado={conectando}>
+            {conectando ? <Loader2 className="animate-spin" /> : <LogIn />}
+            Conectar cuenta de ChatGPT
+          </Boton>
+        </>
+      )}
+
+      <Dialogo
+        abierto={flujo !== null}
+        alCambiar={(abierto) => !abierto && setFlujo(null)}
+      >
+        <ContenidoDialogo>
+          <CabeceraDialogo>
+            <TituloDialogo>Conectar Codex</TituloDialogo>
+            <DescripcionDialogo>
+              Abre el enlace, inicia sesión con la cuenta de ChatGPT y
+              escribe este código. Esta pantalla espera hasta que lo
+              confirmes allí.
+            </DescripcionDialogo>
+          </CabeceraDialogo>
+          <div className="flex items-center justify-center gap-3">
+            <p className="select-all font-mono text-3xl font-bold tracking-[0.3em]">
+              {flujo?.user_code}
+            </p>
+            <Boton
+              variante="fantasma"
+              tamano="icono"
+              title="Copiar código"
+              onClick={copiar}
+            >
+              {copiado ? <Check /> : <Copy />}
+            </Boton>
+          </div>
+          <a
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+            href={flujo?.verification_uri_complete || flujo?.verification_uri}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <ExternalLink /> Abrir chatgpt.com y confirmar
+          </a>
+          <p className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            esperando confirmación…
+          </p>
+        </ContenidoDialogo>
+      </Dialogo>
     </div>
   )
 }

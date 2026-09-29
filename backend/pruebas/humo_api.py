@@ -277,10 +277,24 @@ check("coste por-paso es un reparto", isinstance(r, dict))
 r = cliente.get(f"/api/proyectos/{pid}/coste/eventos").json()
 check("eventos de coste (vacíos sin pasos de pago)", isinstance(r, list))
 
-# flujo SSE: leer un trozo y cerrar
-with cliente.stream("GET", f"/api/proyectos/{pid}/coste/flujo") as flujo_sse:
-    trozo = next(flujo_sse.iter_raw())
-    check("flujo SSE de coste emite", b"event: coste" in trozo, trozo[:80])
+# flujo SSE: leer un trozo y cerrar. El TestClient de starlette es
+# bloqueante y espera a que la respuesta ENTERA acabe: el flujo de coste
+# late 1800 veces x 1 s (30 min). Con el sueño anulado el generador se
+# agota en segundos y el contenido emitido es el mismo.
+import asyncio as _asyncio
+
+_dormir_real = _asyncio.sleep
+
+async def _dormir_instantaneo(_segundos):
+    return None
+
+_asyncio.sleep = _dormir_instantaneo
+try:
+    with cliente.stream("GET", f"/api/proyectos/{pid}/coste/flujo") as flujo_sse:
+        trozo = next(flujo_sse.iter_raw())
+        check("flujo SSE de coste emite", b"event: coste" in trozo, trozo[:80])
+finally:
+    _asyncio.sleep = _dormir_real
 
 # ------------------------------------------------- papelera completa
 r = cliente.delete("/api/proyectos/papelera")

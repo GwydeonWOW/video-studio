@@ -26,7 +26,7 @@ from ..config import AJUSTES
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
 from . import comun, p2_brief, catalogo_visual, encuadres, guia_estilo
-from ..motores import imagen_openai
+from ..motores import imagen_glm
 
 
 def params_defecto() -> dict:
@@ -150,9 +150,9 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     cartelas = [e for e in escenas if es_cartela(unidades, e["id"])]
     a_pagar = [e for e in escenas if not es_cartela(unidades, e["id"])]
     claves = comun.claves_actuales()
-    if a_pagar and not imagen_openai.clave(claves):
-        raise imagen_openai.ErrorImagen(
-            "falta la clave de OpenAI para imagenes (Configuracion -> claves)")
+    if a_pagar and not imagen_glm.clave(claves):
+        raise imagen_glm.ErrorImagen(
+            "falta la clave de GLM para imagenes (Configuracion -> claves)")
     calidad = params.get("calidad", "low")
     carpeta = proyecto.carpeta_paso("assets") / "imagenes"
     planos = []
@@ -171,11 +171,11 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
         destino = carpeta / f"{escena['id']}.png"
         encargo = prompt_de(escena, unidades, params,
                             carta=cartas.get(escena["id"]))
-        imagen_openai.generar(
+        imagen_glm.generar(
             encargo, destino, calidad=calidad, claves=claves, estilo="")
         anotar_operacion(
             datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="imagen",
-            proveedor="openai", modelo="gpt-image-1", calidad=calidad,
+            proveedor="glm", modelo="glm-image", calidad=calidad,
             contexto=f"assets:{escena['id']}", proyecto_dir=proyecto.raiz)
         planos.append({"escena": escena["id"],
                        "imagen": f"pasos/assets/imagenes/{escena['id']}.png",

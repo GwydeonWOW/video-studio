@@ -146,7 +146,7 @@ def manual() -> str:
         "Un estudio que convierte texto en vídeo narrado. Ocho pasos en "
         "cadena: ingesta (texto o enlace), brief (tono/idioma/ritmo), guion "
         "(escenas con narración), voz (locución ElevenLabs), revisión de "
-        "audio, assets (imágenes gpt-image-1 por escena), callouts (rótulos "
+        "audio, assets (imágenes glm-image por escena), callouts (rótulos "
         "y diseño) y render (ffmpeg). Un paso queda OBSOLETO cuando cambian "
         "sus params o los de sus padres: se re-ejecuta y arrastra a sus "
         "descendientes. Cada ejecución es una tanda con trabajo, progreso y "
@@ -157,14 +157,16 @@ def manual() -> str:
         "\n"
         "=== DÓNDE ESTÁ CADA COSA ===\n"
         "  - Configuración (engranaje arriba a la derecha): claves (GLM, "
-        "OpenAI, Anthropic, ElevenLabs, Jamendo, FreeSound), modelos por "
-        "rol, tarifas y estadísticas.\n"
+        "OpenAI, Anthropic, ElevenLabs, Jamendo, FreeSound) o la cuenta de "
+        "ChatGPT conectada (Codex) para los textos, modelos por rol, "
+        "tarifas y estadísticas.\n"
         "  - La papelera y los proyectos viven en la galería; duplicar un "
         "proyecto copia su árbol.\n"
         "  - El coste por paso y el desglose están en la vista de coste del "
         "proyecto.\n"
-        "  - Sin la clave de GLM (u OpenAI/Anthropic según el rol) no hay "
-        "textos; sin OpenAI no hay imágenes; sin ElevenLabs no hay voz.\n")
+        "  - Sin la clave de GLM no hay textos ni imágenes (OpenAI o "
+        "Anthropic pueden cubrir los textos según el rol, y Codex la "
+        "cuenta de ChatGPT); sin ElevenLabs no hay voz.\n")
 
 
 def _bloque(titulo: str, cuerpo) -> str:

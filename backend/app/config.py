@@ -66,7 +66,7 @@ class Ajustes:
     tope_trabajo_s: int = int(os.environ.get("ESTUDIO_TOPE_TRABAJO", "25200"))
 
     #: Calidad de imagen por defecto para proyectos NUEVOS
-    #: (low/medium/high de gpt-image-1).
+    #: (low/medium/high de glm-image).
     calidad_imagen: str = os.environ.get("ESTUDIO_CALIDAD_IMAGEN", "low")
 
     @property

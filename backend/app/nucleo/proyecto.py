@@ -36,6 +36,16 @@ def ahora() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def ahora_precisa() -> str:
+    """Marca ISO-8601 en UTC con microsegundos.
+
+    La bitácora mide duraciones reales de pasos (estadísticas) y hay
+    pasos — ingesta, callouts — que corren en menos de un segundo: con
+    la precisión de ``ahora()`` su duración saldría 0 y se perdería.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def id_valido(texto: object) -> bool:
     return isinstance(texto, str) and bool(PATRON_ID.fullmatch(texto))
 
@@ -195,7 +205,7 @@ class Proyecto:
 
     def bitacora(self, evento: str, detalle: dict | None = None) -> None:
         anadir_jsonl(self.fichero_bitacora,
-                     {"t": ahora(), "evento": evento, **(detalle or {})})
+                     {"t": ahora_precisa(), "evento": evento, **(detalle or {})})
 
     # ------------------------------------------------------------ listado
     @staticmethod

@@ -410,6 +410,29 @@ export interface ClaveEstado {
   mascara: string
 }
 
+/** Sesión OAuth de Codex (GET /api/codex): no es una clave pegable. */
+export interface CodexEstado {
+  conectado: boolean
+  correo: string
+  expira: number
+  pendiente: boolean
+}
+
+/** Flujo de dispositivo recién arrancado (POST /api/codex/conectar). */
+export interface CodexFlujo {
+  user_code: string
+  verification_uri: string
+  verification_uri_complete: string
+  expira_s: number
+  intervalo_s: number
+}
+
+/** Una vuelta de polling del flujo (POST /api/codex/sondeo). */
+export type CodexSondeo =
+  | { estado: "sin_flujo" | "pendiente" }
+  | { estado: "conectado"; correo: string }
+  | { estado: "expirado" | "rechazado" }
+
 /** Voces de ElevenLabs (GET /api/voces). */
 export interface Voz {
   voice_id: string
@@ -808,7 +831,7 @@ export interface FichaPresetsLight {
   plan: PlanLight
   presets: PresetCanal[]
   papelera: PresetCanal[]
-  hay_openai: boolean
+  hay_glm: boolean
   hay_elevenlabs: boolean
 }
 
