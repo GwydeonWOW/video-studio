@@ -154,7 +154,7 @@ export function PanelBrief({ pid, ficha, recargar }: PropsPanel) {
           Tono: <span className="text-foreground">{datos.tono}</span>
           {datos.formato && (
             <>
-              {" · "}Duración: {datos.formato.min}–{datos.formato.max} min
+              {" · "}escenas de {datos.formato.min}–{datos.formato.max} s
             </>
           )}
         </p>
@@ -255,6 +255,13 @@ export function PanelGuion({
         <p className="text-sm text-muted-foreground">
           {escenas.length} escenas ·{" "}
           {segundos(datos.duracion_estimada ?? 0)} estimados
+          {datos.horquilla && (
+            <>
+              {" · "}
+              {datos.horquilla.palabras} palabras (horquilla{" "}
+              {datos.horquilla.min}–{datos.horquilla.max})
+            </>
+          )}
         </p>
         {seleccion.size > 0 && (
           <Boton

@@ -1,6 +1,6 @@
 /**
  * El encargo: el vídeo dicho en UNA pantalla — qué se cuenta (el
- * material), cómo (el tono) y de qué largo (las escenas). Es la
+ * material), cómo (el tono) y de qué largo (la duración). Es la
  * primera de las cinco paradas del móvil y el atajo de escritorio
  * para quien no quiere vivir en nueve pestañas.
  *
@@ -57,7 +57,7 @@ export function PanelEncargo({
     titulo: String(params.ingesta.titulo ?? ""),
     texto: String(params.ingesta.texto ?? ""),
     tono: String(params.brief.tono ?? ""),
-    escenas: String(params.guion.escenas ?? 8),
+    duracion: String(params.guion.duracion_min ?? 10),
   }))
   // lo que hay en el servidor: la base sobre la que se fusiona cada
   // guardado (PUT reemplaza, no fusiona)
@@ -79,8 +79,8 @@ export function PanelEncargo({
       } else if (paso === "brief") {
         if (campos.tono !== String(base.tono ?? "")) base.tono = campos.tono
       } else {
-        const n = Number(campos.escenas)
-        if (Number.isFinite(n) && n >= 1) base.escenas = Math.round(n)
+        const n = Number(campos.duracion)
+        if (Number.isFinite(n) && n >= 1) base.duracion_min = Math.round(n)
       }
       return base
     }
@@ -91,11 +91,13 @@ export function PanelEncargo({
         return campos.titulo !== String(b.titulo ?? "") ||
           campos.texto !== String(b.texto ?? "")
       if (paso === "brief") return campos.tono !== String(b.tono ?? "")
-      const n = Number(campos.escenas)
-      // ?? 8: si el servidor no trae escenas, el campo nació en 8 —
+      const n = Number(campos.duracion)
+      // ?? 10: si el servidor no trae duración, el campo nació en 10 —
       // dejarlo intacto no es un cambio; escribirlo sería sembrar el
       // default (y volver obsoleto un guion ya pagado sin motivo)
-      return Number.isFinite(n) && n >= 1 && Math.round(n) !== (b.escenas ?? 8)
+      return (
+        Number.isFinite(n) && n >= 1 && Math.round(n) !== (b.duracion_min ?? 10)
+      )
     }
 
     const cambios: ("ingesta" | "brief" | "guion")[] =
@@ -188,17 +190,18 @@ export function PanelEncargo({
           </p>
         </div>
         <div className="space-y-2">
-          <Etiqueta htmlFor="encargo-escenas">Escenas</Etiqueta>
+          <Etiqueta htmlFor="encargo-duracion">Duración (min)</Etiqueta>
           <Entrada
-            id="encargo-escenas"
+            id="encargo-duracion"
             tipo="number"
-            valor={campos.escenas}
-            alCambiar={(e) => cambiar("escenas", e.target.value)}
+            valor={campos.duracion}
+            alCambiar={(e) => cambiar("duracion", e.target.value)}
             min={1}
-            max={30}
+            max={120}
           />
           <p className="text-xs text-muted-foreground">
-            de cuántas escenas saldrá el guion (paso 3)
+            duración aproximada del vídeo: el guion sale con las escenas
+            que hagan falta para durarla
           </p>
         </div>
       </div>

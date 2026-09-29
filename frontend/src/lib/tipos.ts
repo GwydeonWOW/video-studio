@@ -81,6 +81,13 @@ export interface DatosBrief {
 export interface DatosGuion {
   escenas: Escena[]
   duracion_estimada: number
+  /** presupuesto de palabras que se le pidió al guion (modo duración) */
+  horquilla?: {
+    objetivo: number
+    min: number
+    max: number
+    palabras: number
+  }
 }
 
 export interface DatosVoz {

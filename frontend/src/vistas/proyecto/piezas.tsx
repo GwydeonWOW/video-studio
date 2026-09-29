@@ -115,7 +115,22 @@ const CAMPOS: Record<string, DescriptorCampo[]> = {
     },
   ],
   guion: [
-    { clave: "escenas", etiqueta: "Escenas", tipo: "numero", min: 1, max: 30 },
+    {
+      clave: "duracion_min",
+      etiqueta: "Duración (min)",
+      tipo: "numero",
+      min: 1,
+      max: 120,
+      ayuda: "Manda sobre «Escenas»: el guion reparte las escenas para durar esto.",
+    },
+    {
+      clave: "escenas",
+      etiqueta: "Escenas",
+      tipo: "numero",
+      min: 1,
+      max: 120,
+      ayuda: "Solo se usa si no hay duración (proyectos viejos).",
+    },
     {
       clave: "tono",
       etiqueta: "Tono",
