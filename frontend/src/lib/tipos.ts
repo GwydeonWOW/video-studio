@@ -799,11 +799,27 @@ export interface RitmoLight {
 export interface EncargoLight {
   nombre: string
   estilo_prompt: string
+  /** nombres de imágenes de referencia ya subidas al buzón del servidor */
+  estilo_imagenes?: string[]
   tono_prompt: string
   voz_prompt: string
   idioma: string
   ritmo: string
   voz_id?: string
+}
+
+/** Una imagen de referencia aceptada por el buzón (tras subirla). */
+export interface ImagenAportada {
+  nombre: string
+  origen?: string
+  bytes?: number
+}
+
+/** Respuesta de POST /api/presets-light/imagenes. */
+export interface RespuestaAportadas {
+  imagenes: ImagenAportada[]
+  avisos: string[]
+  tope: number
 }
 
 /** Una tarea del plan (lo que hará el taller, en una línea). */
@@ -829,6 +845,7 @@ export interface FichaPresetsLight {
   ritmo_defecto: string
   idiomas: { id: string; nombre: string }[]
   plan: PlanLight
+  max_imagenes_estilo: number
   presets: PresetCanal[]
   papelera: PresetCanal[]
   hay_glm: boolean
@@ -839,6 +856,9 @@ export interface FichaPresetsLight {
 export interface FichaPresetLight {
   preset: PresetCanal
   encargo: Record<string, string>
+  /** imágenes de referencia sembradas en el taller (sus nombres) */
+  estilo_imagenes: string[]
+  max_imagenes_estilo: number
   muestras: string[]
   taller: string
   activo: TrabajoFicha | null

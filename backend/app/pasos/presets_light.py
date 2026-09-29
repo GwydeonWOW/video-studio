@@ -11,7 +11,7 @@ solo vídeo.
 El modo light hace las mismas cosas y no para en ninguna. Se le dan
 cuatro datos:
 
-    estilo gráfico    una descripción escrita (aquí no se baja YouTube)
+    estilo gráfico    imágenes de referencia y/o una descripción escrita
     tono del guion    una descripción escrita
     voz               una descripción escrita
     idioma            uno, elegido a mano
@@ -385,14 +385,30 @@ class ErrorEncargo(ValueError):
 #: Los idiomas que sabe escribir el estudio entero (guion y tono).
 IDIOMAS = ("es", "en")
 
+#: Cuántas imágenes de referencia se pueden adjuntar al estilo. Es un
+#: tope de SUBIDA, no de generación: las aportadas son material humano
+#: que la guía lee tal cual — el tope existe para que un catálogo entero
+#: no acabe pegado a una sola llamada, no para recortar el kit del canal.
+MAX_IMAGENES_ESTILO = 24
+
+
+def max_imagenes_estilo():
+    """El tope de imágenes de referencia del estilo. -> int
+
+    Función y no constante directa para que la API y la pantalla digan
+    «24» del mismo sitio que lo exige `validar_encargo`.
+    """
+    return MAX_IMAGENES_ESTILO
+
 
 def validar_encargo(crudo):
     """Deja el encargo limpio, o levanta diciendo qué falta. -> dict
 
-    El estilo gráfico aquí es SOLO texto: esta réplica no baja vídeos de
-    YouTube (el material es lo que se escribe), así que la descripción
-    escrita es la única fuente — y con menos de ocho letras se inventa
-    todo lo que no se dice, que es casi todo.
+    El estilo gráfico son IMÁGENES DE REFERENCIA y/o una descripción
+    escrita. Con imágenes la fuente es lo que se ve (el kit visual del
+    canal) y lo escrito acompaña; sin imágenes la descripción escrita es
+    la única fuente — y con menos de ocho letras se inventa todo lo que
+    no se dice, que es casi todo.
     """
     datos = crudo if isinstance(crudo, dict) else {}
     limpio = {}
@@ -416,17 +432,36 @@ def validar_encargo(crudo):
     # de en medio en vez de tumbar el encargo.
     limpio["ritmo"] = ritmo_de(datos.get("ritmo"))["id"]
 
-    # EL ESTILO GRÁFICO: una descripción escrita.
+    # EL ESTILO GRÁFICO: las imágenes aportadas y/o una descripción.
+    # `estilo_imagenes` son NOMBRES de ficheros ya subidos al buzón de
+    # aportadas (la ruta la resuelve la ruta que siembra, no el encargo:
+    # un encargo con rutas absolutas dentro no se puede copiar ni
+    # congelar).
     prompt = " ".join(str(datos.get("estilo_prompt") or "").split())
-    if not prompt:
+    imagenes = datos.get("estilo_imagenes")
+    if imagenes is None:
+        imagenes = []
+    if not isinstance(imagenes, list):
+        raise ErrorEncargo("«estilo_imagenes» tiene que ser una lista de "
+                           "nombres de imágenes")
+    imagenes = [str(n).strip() for n in imagenes if str(n).strip()]
+    if len(imagenes) > MAX_IMAGENES_ESTILO:
         raise ErrorEncargo(
-            "falta el estilo gráfico: describe con tus palabras cómo "
-            "quiere verte («cómic europeo de línea clara, fondos de "
+            f"has adjuntado {len(imagenes)} imágenes y el tope son "
+            f"{MAX_IMAGENES_ESTILO}")
+    if prompt and len(prompt) < 8:
+        raise ErrorEncargo(
+            "las indicaciones del estilo gráfico son opcionales cuando hay "
+            "imágenes, pero con dos palabras no dicen nada: descríbelo con "
+            "algo más de detalle o deja solo el material")
+    if not imagenes and not prompt:
+        raise ErrorEncargo(
+            "falta el estilo gráfico: adjunta al menos una imagen que ya "
+            "tenga el aspecto que quieres, o describe con tus palabras cómo "
+            "quiero verte («cómic europeo de línea clara, fondos de "
             "acuarela»)")
-    if len(prompt) < 8:
-        raise ErrorEncargo(
-            "describe el estilo gráfico con algo más de detalle: con dos "
-            "palabras se lo inventa entero")
+    if imagenes:
+        limpio["estilo_imagenes"] = imagenes
     limpio["estilo_prompt"] = prompt
 
     # EL TONO DEL GUION: también escrito. No hay nada que copiar, hay

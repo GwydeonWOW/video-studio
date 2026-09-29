@@ -315,8 +315,10 @@ def proponer(proyecto: Proyecto, params: dict, trabajo, peticion: str = "") -> d
         raise ValueError("falta el guion: genera primero el paso anterior")
     ids = [str(e["id"]).strip().upper() for e in escenas]
 
+    datos_proyecto = proyecto.leer()
     encargo = []
-    encargo.append(f"VÍDEO: {proyecto.nombre} (idioma {proyecto.idioma or 'es'})")
+    encargo.append(f"VÍDEO: {datos_proyecto.get('nombre', proyecto.id)} "
+                   f"(idioma {datos_proyecto.get('idioma', 'es')})")
     estilo = str((params or {}).get("estilo", "")).strip()
     if estilo:
         encargo.append(f"ESTILO GRÁFICO DEL CANAL (contexto; no lo repitas "

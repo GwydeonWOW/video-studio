@@ -17,9 +17,13 @@ valores, nunca escribe «por defecto» al abrir, y quien decide regenerar
 """
 from __future__ import annotations
 
+import base64
+import re
 import secrets
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -296,6 +300,81 @@ def _guardar_encargo(taller: Proyecto, encargo: dict) -> None:
     taller.escribir(datos)
 
 
+# --------------------------------------------------- imágenes de referencia
+#
+# El material humano sube a un BUZÓN antes de que exista el taller (la
+# pantalla pide el encargo y las imágenes a la vez):
+# `_imagenes_aportadas` bajo la raíz de proyectos, con `_` delante para
+# que el listado no lo enseñe. Los NOMBRES viajan en
+# `encargo.estilo_imagenes`, y al crear el taller —o al rehacer el
+# estilo con material nuevo— se SIEMBRAN en `estilo/aportadas/` dentro
+# del taller: a partir de ahí la guía las lee del TALLER, no del
+# encargo, y rehacer sin material nuevo reutiliza lo sembrado.
+
+EXT_APORTADAS = (".png", ".jpg", ".jpeg", ".webp")
+MAX_BYTES_APORTADA = 10 * 1024 * 1024
+_FICHERO_WEB = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+_MIMES_APORTADAS = {".png": "image/png", ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+
+def _carpeta_aportadas() -> Path:
+    """El buzón: imágenes subidas que aún no pertenecen a ningún taller."""
+    return AJUSTES.carpeta_proyectos / "_imagenes_aportadas"
+
+
+def _rutas_aportadas(nombres) -> list[Path]:
+    """Las rutas del buzón que existen de verdad. -> [Path]
+
+    Los nombres vienen del navegador (del encargo guardado o de una
+    petición): sólo se aceptan nombres de fichero LLANOS —sin ruta, sin
+    `..`, sin separadores— que estén en el buzón. Un nombre que no
+    exista se ignora: consumido por otro taller, o inventado.
+    """
+    salida = []
+    for nombre in nombres or []:
+        nombre = str(nombre or "").strip()
+        if not _FICHERO_WEB.match(nombre):
+            continue
+        ruta = _carpeta_aportadas() / nombre
+        if ruta.is_file():
+            salida.append(ruta)
+    return salida
+
+
+def _aportadas_del_taller(taller: Proyecto) -> list[str]:
+    """Las imágenes sembradas en el taller, ordenadas. -> [rutas]
+
+    Esto —y no el encargo— es la fuente de la que sale la guía: el
+    encargo guarda nombres de buzón que ya se consumieron al sembrar.
+    """
+    carpeta = taller.ruta("estilo", "aportadas")
+    if not carpeta.is_dir():
+        return []
+    return sorted(str(r) for r in carpeta.iterdir()
+                  if r.is_file() and r.suffix.lower() in EXT_APORTADAS)
+
+
+def _sembrar_aportadas(taller: Proyecto, encargo: dict) -> bool:
+    """Mueve el material del buzón al taller. -> si sembró algo
+
+    El destino se VACÍA antes: lo que se siembra es EL kit, no una
+    adición al kit viejo. Y sin nombres nuevos no se toca nada — rehacer
+    el estilo sin subir material reutiliza lo que ya está sembrado, que
+    es material humano y no se paga dos veces.
+    """
+    rutas = _rutas_aportadas(encargo.get("estilo_imagenes"))
+    if not rutas:
+        return False
+    destino = taller.ruta("estilo", "aportadas")
+    if destino.is_dir():
+        shutil.rmtree(destino)
+    destino.mkdir(parents=True, exist_ok=True)
+    for indice, ruta in enumerate(rutas, start=1):
+        shutil.move(str(ruta), destino / f"{indice:02d}_{ruta.name}")
+    return True
+
+
 def _grafismo_de_guia(estilo_prompt: str, guia: dict) -> dict:
     """El set de diseño y los colores fijados, sacados de la guía.
 
@@ -335,6 +414,7 @@ def _tarea_guia(taller, estado, encargo, trabajo) -> dict:
     params = estado.paso("assets").get("params", {})
     resultado = guia_estilo.proponer(
         taller, params, trabajo, descripcion=encargo.get("estilo_prompt", ""),
+        imagenes=_aportadas_del_taller(taller),
         peticion=(encargo.get("feedback") or {}).get("estilo", ""))
     estado.actualizar_params("assets", {
         "guia": resultado["guia"], "estilo": encargo.get("estilo_prompt", "")})
@@ -467,11 +547,20 @@ def _hecha(tid: str, taller, estado, encargo) -> bool:
     return False
 
 
-def _correr_tanda(taller, estado, encargo, tanda, trabajo) -> dict:
-    """Corre las tareas de una tanda; lo que ya está hecho se salta."""
+def _correr_tanda(taller, estado, encargo, tanda, trabajo,
+                  retomar: bool = False) -> dict:
+    """Corre las tareas de una tanda.
+
+    Sólo RETOMANDO se salta lo que ya está hecho (reanudar un taller
+    cortado a medias sin volver a pagar lo pagado). Una pasada normal y
+    un rehacer NO saltan nada: su encargo es justamente volver a
+    hacerlo. Saltar siempre era un fallo heredado del porte — rehacer
+    el estilo no rehacía nada, y cambiar de idioma dejaba el tono
+    escrito en el idioma viejo.
+    """
     resultados, pendientes = {}, []
     for tarea in tanda:
-        if _hecha(tarea["id"], taller, estado, encargo):
+        if retomar and _hecha(tarea["id"], taller, estado, encargo):
             trabajo.avance(f"{tarea['nombre']}: ya estaba hecho, no se "
                            f"vuelve a pagar")
             continue
@@ -513,6 +602,10 @@ def _congelar(taller: Proyecto, prid: str | None, encargo: dict) -> dict:
     guia = (datos.get("estilo") or {}).get("guia") or {}
     datos["origen"] = {
         "estilo_prompt": encargo.get("estilo_prompt", ""),
+        # el material humano sembrado en el taller (nombres definitivos,
+        # no los del buzón, que ya se consumieron)
+        "estilo_imagenes": [Path(r).name
+                            for r in _aportadas_del_taller(taller)],
         "tono_prompt": encargo.get("tono_prompt", ""),
         "voz_prompt": encargo.get("voz_prompt", ""),
         "voz_id": encargo.get("voz_id", ""),
@@ -531,14 +624,20 @@ def _congelar(taller: Proyecto, prid: str | None, encargo: dict) -> dict:
         miniatura=str(taller.ruta("muestras", "miniatura.png")), pid=prid)
 
 
-def _correr_taller(taller: Proyecto, prid: str | None, solo=None) -> dict:
-    """La función del trabajo: tanda a tanda, congelando al final."""
+def _correr_taller(taller: Proyecto, prid: str | None, solo=None,
+                   retomar: bool = False) -> dict:
+    """La función del trabajo: tanda a tanda, congelando al final.
+
+    `retomar` es para reanudar un taller cortado a medias (se salta lo
+    que ya está en disco); nadie más salta nada.
+    """
     def funcion(trabajo):
         encargo = _encargo_de(taller)
         tandas = presets_light.tandas_de(encargo, solo=solo)
         for tanda in tandas:
             trabajo.comprobar_cancelacion()
-            _correr_tanda(taller, Estado(taller), encargo, tanda, trabajo)
+            _correr_tanda(taller, Estado(taller), encargo, tanda, trabajo,
+                          retomar=retomar)
         ficha = _congelar(taller, prid, encargo)
         trabajo.avance(f"preset guardado: {ficha['nombre']}")
         return {"preset": ficha}
@@ -558,6 +657,7 @@ def ficha_light() -> dict:
         "idiomas": [{"id": i, "nombre": n} for i, n in
                     presets_canal.NOMBRES_IDIOMA.items()],
         "plan": presets_light.plan_de({}),
+        "max_imagenes_estilo": presets_light.max_imagenes_estilo(),
         "presets": presets_canal.listar()["presets"]["canal"],
         "papelera": presets_canal.listar()["papelera"],
         "hay_glm": bool(claves.get("glm")),
@@ -571,6 +671,101 @@ def plan_light(cuerpo: dict) -> dict:
     return presets_light.plan_de((cuerpo or {}).get("encargo") or {})
 
 
+@router.post("/presets-light/imagenes", dependencies=_MUTAR)
+def subir_aportadas(cuerpo: dict) -> dict:
+    """Imágenes de referencia del estilo, en base64 dentro de JSON.
+
+    Mismo transporte que las capturas (`capturas._validar_png`): la
+    casa no arrastra multipart por esto. Cada entrada es
+    `{"nombre": "...", "datos": "data:image/png;base64,..."}`; van al
+    BUZÓN con un nombre del servidor —un uuid corto— porque aún no hay
+    taller al que pertenecer. Ese nombre es el que viaja en
+    `encargo.estilo_imagenes`.
+
+    Nada de lo que llegue tumbar la subida entera: lo que no pasa, se
+    cuenta en `avisos` y el resto se queda.
+    """
+    entradas = (cuerpo or {}).get("imagenes")
+    if not isinstance(entradas, list):
+        entradas = []
+    buzon = _carpeta_aportadas()
+    buzon.mkdir(parents=True, exist_ok=True)
+    aceptadas, avisos = [], []
+    for entrada in entradas:
+        if not isinstance(entrada, dict):
+            continue
+        nombre = Path(str(entrada.get("nombre") or "imagen")).name
+        datos_url = str(entrada.get("datos") or "").strip()
+        crudo = datos_url.split(",", 1)[-1] if datos_url.startswith(
+            "data:") else datos_url
+        sufijo = Path(nombre).suffix.lower() or _sufijo_de_data_url(datos_url)
+        try:
+            datos = base64.b64decode(crudo, validate=False)
+        except Exception:                                       # noqa: BLE001
+            avisos.append(f"{nombre}: no se puede decodificar")
+            continue
+        if not datos:
+            avisos.append(f"{nombre}: llegó vacía")
+            continue
+        if sufijo not in EXT_APORTADAS:
+            avisos.append(f"{nombre}: no es png, jpg, jpeg ni webp")
+            continue
+        if len(datos) > MAX_BYTES_APORTADA:
+            avisos.append(f"{nombre}: pesa más de "
+                          f"{MAX_BYTES_APORTADA // (1024 * 1024)} MB")
+            continue
+        destino = buzon / f"{uuid4().hex[:12]}{sufijo}"
+        destino.write_bytes(datos)
+        aceptadas.append({"nombre": destino.name, "origen": nombre,
+                          "bytes": len(datos)})
+    return {"imagenes": aceptadas, "avisos": avisos,
+            "tope": presets_light.max_imagenes_estilo()}
+
+
+def _sufijo_de_data_url(datos_url: str) -> str:
+    """La extensión de un data-URL (`data:image/webp;base64,...`). -> str"""
+    tipos = {"image/png": ".png", "image/jpeg": ".jpg",
+             "image/webp": ".webp"}
+    if datos_url.startswith("data:"):
+        return tipos.get(datos_url[5:datos_url.find(";")], "")
+    return ""
+
+
+def _servir_aportada(carpeta: Path, nombre: str):
+    """Una imagen del buzón o del taller, con el candado de siempre.
+
+    El nombre viaja en la URL: se resuelve DENTRO de su carpeta y sin
+    `..` ni rutas absolutas (mismo candado que los ficheros de preset).
+    """
+    try:
+        ruta = ruta_contenida(carpeta, nombre)
+    except ValueError:
+        raise HTTPException(404, "fichero desconocido")
+    if not ruta.is_file() or ruta.parent != carpeta:
+        raise HTTPException(404, "fichero desconocido")
+    return FileResponse(ruta, media_type=_MIMES_APORTADAS.get(
+        ruta.suffix.lower(), "application/octet-stream"))
+
+
+@router.get("/presets-light/imagenes/{nombre}", dependencies=[_SESION])
+def leer_aportada(nombre: str):
+    """Una imagen del buzón: para verla antes de crear el taller."""
+    return _servir_aportada(_carpeta_aportadas(), nombre)
+
+
+@router.delete("/presets-light/imagenes/{nombre}", dependencies=_MUTAR)
+def borrar_aportada(nombre: str) -> dict:
+    """Quita una imagen del buzón (antes de crear el taller)."""
+    try:
+        ruta = ruta_contenida(_carpeta_aportadas(), nombre)
+    except ValueError:
+        raise HTTPException(404, "fichero desconocido")
+    if ruta.parent == _carpeta_aportadas() and ruta.is_file():
+        ruta.unlink()
+        return {"borrada": ruta.name}
+    raise HTTPException(404, "fichero desconocido")
+
+
 @router.post("/presets-light", status_code=202, dependencies=_MUTAR)
 def crear_light(cuerpo: dict) -> dict:
     """Crea el taller y lanza la generación del canal entero."""
@@ -579,6 +774,7 @@ def crear_light(cuerpo: dict) -> dict:
     except presets_light.ErrorEncargo as fallo:
         raise _a_400(fallo)
     taller = _crear_taller(encargo)
+    _sembrar_aportadas(taller, encargo)
     funcion = _correr_taller(taller, None)
     trabajo = GESTOR.lanzar(taller.id, "taller", funcion)
     return {"taller": taller.id, "trabajo": GESTOR.estado(trabajo.id)}
@@ -600,35 +796,87 @@ def leer_light(prid: str) -> dict:
                         ("estilo_prompt", "tono_prompt", "voz_prompt",
                          "voz_id", "idioma", "ritmo", "feedback",
                          "tono_resumen", "estilo_resumen")},
+            "estilo_imagenes": origen.get("estilo_imagenes") or [],
+            "max_imagenes_estilo": presets_light.max_imagenes_estilo(),
             "muestras": muestras,
             "taller": taller.id if taller else "",
             "activo": GESTOR.activo_de(taller.id) if taller else None}
 
 
+@router.get("/presets-light/{prid}/aportadas/{nombre}",
+            dependencies=[_SESION])
+def aportada_del_preset(prid: str, nombre: str):
+    """Una imagen de referencia sembrada en el taller de este preset."""
+    taller = _taller_de(prid)
+    if taller is None:
+        raise HTTPException(404, "el taller de este preset ya no está")
+    return _servir_aportada(taller.ruta("estilo", "aportadas"), nombre)
+
+
 @router.post("/presets-light/{prid}/regenerar", status_code=202,
              dependencies=_MUTAR)
 def regenerar_light(prid: str, cuerpo: dict) -> dict:
-    """Rehace UNA de las tres partes (estilo, tono, voz) con feedback."""
+    """Rehace UNA de las tres partes (estilo, tono, voz) con feedback.
+
+    El feedback va suelto («que los subtítulos sean más claros»). El
+    MATERIAL nuevo va en `origen` —la misma forma que el origen guardado
+    del preset— y sólo el estilo lo consume: si trae `estilo_prompt` o
+    `estilo_imagenes`, la fuente del estilo se SUSTITUYE entera (lo
+    escrito y las imágenes se cambian JUNTOS, no se mezclan) y las
+    imágenes nuevas se siembran en el taller antes de rehacer. Con
+    material nuevo el kit sembrado se reemplaza; sin él, la guía
+    relee lo que ya estaba sembrado.
+    """
     datos = cuerpo if isinstance(cuerpo, dict) else {}
     parte = str(datos.get("parte") or "").strip()
     if parte not in presets_light.PARTES:
         raise _a_400(ValueError(
             "parte desconocida: "
             + ", ".join(presets_light.PARTES)))
+    fuente = datos.get("origen") if isinstance(datos.get("origen"), dict) \
+        else {}
+    if fuente and parte == "voz":
+        raise _a_400(ValueError(
+            "la voz no sale del material del estilo: descríbela y se "
+            "busca otra vez"))
     taller = _taller_de(prid)
     if taller is None:
         raise HTTPException(404, "el taller de este preset ya no está: "
                                  "duplica el preset para volver a generarlo")
     encargo = _encargo_de(taller)
+    material = False
+    if parte == "estilo" and ("estilo_prompt" in fuente
+                              or "estilo_imagenes" in fuente):
+        encargo["estilo_prompt"] = " ".join(
+            str(fuente.get("estilo_prompt") or "").split())
+        if fuente.get("estilo_imagenes"):
+            encargo["estilo_imagenes"] = [str(n).strip()
+                                          for n in fuente["estilo_imagenes"]]
+        else:
+            # la fuente nueva no trae imágenes: el material sembrado ya
+            # no es la fuente y no puede seguir alimentando la guía
+            encargo.pop("estilo_imagenes", None)
+            shutil.rmtree(taller.ruta("estilo", "aportadas"),
+                          ignore_errors=True)
+        try:
+            # sólo para validar el par nuevo: el encargo del taller
+            # lleva más claves de las que devuelve el validador
+            presets_light.validar_encargo(encargo)
+        except presets_light.ErrorEncargo as fallo:
+            raise _a_400(fallo)
+        material = _sembrar_aportadas(taller, encargo)
     feedback = " ".join(str(datos.get("feedback") or "").split())
     if feedback:
         encargo.setdefault("feedback", {})[parte] = feedback
-        _guardar_encargo(taller, encargo)
+    _guardar_encargo(taller, encargo)
+    taller.bitacora("preset_light_regenerar",
+                    {"parte": parte, "material": material})
     trabajo = GESTOR.lanzar(taller.id, "taller",
                             _correr_taller(taller, prid,
                                            solo=presets_light.PARTES[parte]
                                            ["tareas"]))
-    return {"trabajo": GESTOR.estado(trabajo.id), "parte": parte}
+    return {"trabajo": GESTOR.estado(trabajo.id), "parte": parte,
+            "material": material}
 
 
 @router.put("/presets-light/{prid}", dependencies=_MUTAR)
@@ -703,6 +951,7 @@ def duplicar_light(prid: str) -> dict:
         "idioma": origen.get("idioma", "es"),
         "ritmo": origen.get("ritmo", ""),
         "estilo_prompt": origen.get("estilo_prompt", ""),
+        "estilo_imagenes": origen.get("estilo_imagenes") or [],
         "tono_prompt": origen.get("tono_prompt", ""),
         "voz_prompt": origen.get("voz_prompt", ""),
         "voz_id": origen.get("voz_id", ""),

@@ -20,6 +20,7 @@ precedencia dicha, así que gana si choca.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from ..nucleo.proyecto import Proyecto
 from . import comun
@@ -27,8 +28,9 @@ from ..motores import llm
 
 PASO = "guia_estilo"
 
-SISTEMA = """Eres director de arte. Te dan en palabras el estilo visual que \
-quiere un canal y escribes la guía de estilo que permite dibujar sus planos.
+SISTEMA = """Eres director de arte. Te dan en palabras —o en imágenes de \
+referencia— el estilo visual que quiere un canal y escribes la guía de \
+estilo que permite dibujar sus planos.
 
 LO QUE HAY QUE HACER CON ESO
 Convertir la intención en decisiones de dibujo. Donde el canal dijo
@@ -85,6 +87,29 @@ CAMPOS = ("trazo", "relleno", "personajes", "caras", "manos", "fondos",
           "luz", "composicion", "acabado", "evitar", "resumen_es")
 
 
+#: El encargo cuando la fuente es el material humano: el kit visual
+#: subido por el canal. Las imágenes viajan ADJUNTAS a la llamada (las
+#: rutas aquí son sólo para que el aviso diga qué se miró).
+BLOQUE_IMAGENES = """El canal ha adjuntado SU KIT VISUAL: {cuenta} imágenes de \
+referencia que ya tienen el aspecto que quiere ({nombres}). Van adjuntas a \
+este mensaje: míralas UNA A UNA antes de escribir nada.
+
+La guía se escribe DESCRIBIENDO LO QUE SE VE. Los números salen de contar en \
+esas imágenes: píxeles de contorno, tonos por superficie, dedos, cabezas de \
+altura, colores exactos. No inventes lo que no esté en el material: donde algo \
+no se ve, elígelo TÚ coherente con lo que sí se ve, y dilo."""
+
+#: Lo escrito cuando hay imágenes: ACOMPAÑA y manda (patrón del
+#: original, `estilo.BLOQUE_INDICACIONES`).
+BLOQUE_INDICACIONES = """
+Y ADEMÁS HA ESCRITO ESTO, que manda sobre lo que veas:
+"{texto}"
+
+Aplícalo a la guía. Si contradice a las imágenes, gana lo escrito — por eso \
+lo ha escrito. Si lo que pide no se ve en ninguna imagen, escríbelo igual: te \
+está diciendo en qué quiere que se aparte del material."""
+
+
 def guia_de(params_assets: dict) -> dict:
     """La guía guardada en params de assets (o {})."""
     ficha = (params_assets or {}).get("guia")
@@ -92,32 +117,51 @@ def guia_de(params_assets: dict) -> dict:
 
 
 def proponer(proyecto: Proyecto, params: dict, trabajo,
-             descripcion: str = "", peticion: str = "") -> dict:
-    """Escribe la guía a partir de la descripción del estilo. -> ficha.
+             descripcion: str = "", imagenes=None,
+             peticion: str = "") -> dict:
+    """Escribe la guía a partir del material del estilo. -> ficha.
 
-    'descripcion' es lo que se pide AHORA (si viene vacía se usa el
-    estilo del canal + el estilo del proyecto); 'peticion' es la
-    corrección de ESTA pasada y manda al final.
+    Con `imagenes` (rutas de las aportadas por el canal) la guía nace
+    de MIRARLAS: son el kit visual, y lo escrito en 'descripcion' pasa
+    a ser indicaciones que mandan sobre lo que se vea. Sin imágenes, la
+    descripción escrita es la única fuente (la que viene, o el estilo
+    del proyecto); 'peticion' es la corrección de ESTA pasada y va la
+    última, con la precedencia dicha.
     """
+    rutas = [str(r) for r in (imagenes or []) if Path(str(r)).is_file()]
     base = " ".join(str(descripcion or "").split())
-    if not base:
-        base = " ".join(str((params or {}).get("estilo", "")).split())
-    if len(base) < 8:
-        raise ValueError("para escribir la guía hace falta material: "
-                         "describe el estilo gráfico con algo más de detalle "
-                         "(con dos palabras se lo inventa todo)")
-
-    encargo = [f'LO QUE HA PEDIDO EL CANAL, tal cual lo escribió:\n"{base}"']
+    if rutas:
+        encargo = [BLOQUE_IMAGENES.format(
+            cuenta=len(rutas),
+            nombres=", ".join(Path(r).name for r in rutas))]
+        if base:
+            encargo.append(BLOQUE_INDICACIONES.format(texto=base))
+    else:
+        if not base:
+            base = " ".join(str((params or {}).get("estilo", "")).split())
+        if len(base) < 8:
+            raise ValueError("para escribir la guía hace falta material: "
+                             "adjunta imágenes de referencia del estilo, o "
+                             "descríbelo con algo más de detalle (con dos "
+                             "palabras se lo inventa todo)")
+        encargo = [f'LO QUE HA PEDIDO EL CANAL, tal cual lo escribió:\n'
+                   f'"{base}"']
     peticion = " ".join(str(peticion or "").split())
     if peticion:
         encargo.append(f'\nCORRECCIÓN DE ESTA PASADA, que manda sobre lo de '
                        f'arriba si chocan:\n"{peticion}"')
-    encargo.append(f"\nIdioma del vídeo: {proyecto.idioma or 'es'}.")
+    idioma = str(proyecto.leer().get("idioma", "es"))
+    encargo.append(f"\nIdioma del vídeo: {idioma}.")
 
-    trabajo.avance("escribiendo la guía de estilo con números")
+    if rutas:
+        trabajo.avance(f"mirando {len(rutas)} imágenes de referencia y "
+                       f"escribiendo la guía")
+    else:
+        trabajo.avance("escribiendo la guía de estilo con números")
     llamada = llm.rol_config("guia_estilo", comun.ajustes_llm())
     llamada.sistema = SISTEMA
     llamada.instruccion = "\n".join(encargo)
+    llamada.imagenes = rutas
     llamada.contexto = "guia_estilo"
     llamada.proyecto = proyecto.id
     crudo = llm.llamar_json(llamada, claves=comun.claves_actuales())

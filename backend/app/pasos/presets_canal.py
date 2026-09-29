@@ -124,7 +124,11 @@ TIPOS = {
 #: es el estilo gráfico CON SU ENTRADA ORIGINAL más esa corrección.
 #:
 #: `taller` es el id del proyecto oculto donde se generó.
-CLAVES_ORIGEN = ("estilo_prompt", "tono_prompt", "voz_prompt", "voz_id",
+CLAVES_ORIGEN = ("estilo_prompt",
+                 # el material humano del estilo: nombres de las imágenes
+                 # sembradas en el taller (nombres llanos, no rutas)
+                 "estilo_imagenes",
+                 "tono_prompt", "voz_prompt", "voz_id",
                  "idioma", "ritmo", "taller", "feedback",
                  # Descripciones cortas de lo que salió, para poder
                  # ENSEÑAR el estilo sin abrirlo entero. No son params.

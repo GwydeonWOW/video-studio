@@ -13,11 +13,13 @@ comandos — ver docs/AUDITORIA.md H2); los prompts son datos, no ejecutables.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import requests
 
@@ -37,9 +39,14 @@ PROVEEDORES = {
         "nombre": "GLM (z.ai)",
         "esquema": "openai",
         "base": "https://api.z.ai/api/paas/v4",
-        "modelos": ["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-4.6"],
+        "modelos": ["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-4.6",
+                    "glm-5.3v"],
         "defecto": "glm-5.3",
         "variable": "ESTUDIO_GL_KEY",
+        # modelo que lee imagenes: si una llamada viaja con imagenes y el
+        # rol esta configurado con otro modelo, se cambia a este (los
+        # insignia de openai/anthropic/codex ya ven, no declaran «vision»)
+        "vision": "glm-5.3v",
     },
     "openai": {
         "nombre": "OpenAI GPT",
@@ -110,6 +117,9 @@ class Llamada:
     json: bool = False
     contexto: str = ""          # para la bitacora de coste (paso/escena)
     proyecto: str = ""
+    #: rutas de imagenes que acompañan a la instruccion (el modelo las
+    #: ve; se usan para escribir la guia de estilo desde el material)
+    imagenes: list[str] = field(default_factory=list)
 
 
 def clave_de(proveedor: str, claves: dict | None = None) -> str:
@@ -171,6 +181,8 @@ def llamar(llamada: Llamada, claves: dict | None = None,
     los 4xx de autenticacion fallan rapido — reintentar una clave mala no la
     arregla.
     """
+    if llamada.imagenes:
+        _resolver_vision(llamada)
     clave = clave_de(llamada.proveedor, claves)
     if not clave:
         if llamada.proveedor == "codex":
@@ -195,8 +207,7 @@ def llamar(llamada: Llamada, claves: dict | None = None,
             "model": llamada.modelo,
             "instructions": llamada.sistema or "",
             "input": [{"role": "user",
-                       "content": [{"type": "input_text",
-                                    "text": llamada.instruccion}]}],
+                       "content": _contenido_user(llamada, esquema)}],
             "stream": True,
             "store": False,
         }
@@ -205,7 +216,8 @@ def llamar(llamada: Llamada, claves: dict | None = None,
         mensajes = []
         if llamada.sistema:
             mensajes.append({"role": "system", "content": llamada.sistema})
-        mensajes.append({"role": "user", "content": llamada.instruccion})
+        mensajes.append({"role": "user",
+                         "content": _contenido_user(llamada, esquema)})
         cuerpo = {"model": llamada.modelo, "messages": mensajes,
                   "max_tokens": llamada.max_tokens,
                   "temperature": llamada.temperatura}
@@ -215,7 +227,8 @@ def llamar(llamada: Llamada, claves: dict | None = None,
         cuerpo = {"model": llamada.modelo,
                   "max_tokens": llamada.max_tokens,
                   "temperature": llamada.temperatura,
-                  "messages": [{"role": "user", "content": llamada.instruccion}]}
+                  "messages": [{"role": "user",
+                                "content": _contenido_user(llamada, esquema)}]}
         if llamada.sistema:
             cuerpo["system"] = llamada.sistema
 
@@ -254,6 +267,64 @@ def llamar(llamada: Llamada, claves: dict | None = None,
             time.sleep(2 ** intento)
     raise ErrorLLM(f"{llamada.proveedor} fallo tras {INTENTOS} intentos: "
                    f"{ultimo_error}")
+
+
+def _resolver_vision(llamada: Llamada) -> None:
+    """Una llamada con imagenes necesita un modelo que las vea.
+
+    Solo actua si el proveedor declara «vision» (glm: el de texto no lee
+    imagenes). openai/anthropic/codex no lo declaran: sus insignia ya son
+    multimodales y se quedan con el modelo configurado en el rol.
+    """
+    vision = PROVEEDORES.get(llamada.proveedor, {}).get("vision")
+    if vision and llamada.modelo != vision:
+        llamada.modelo = vision
+
+
+_MIMES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+          ".webp": "image/webp"}
+
+
+def _leer_imagen(ruta: str) -> tuple[str, str]:
+    """Lee una imagen de disco -> (mime, base64). Con nombre de fallo claro."""
+    fichero = Path(ruta)
+    mime = _MIMES.get(fichero.suffix.lower())
+    if not mime:
+        raise ErrorLLM(f"imagen con formato no soportado: {fichero.name}")
+    datos = base64.b64encode(fichero.read_bytes()).decode("ascii")
+    return mime, datos
+
+
+def _contenido_user(llamada: Llamada, esquema: str):
+    """Contenido del mensaje de usuario: texto plano, o texto + imagenes.
+
+    Sin imagenes devuelve la instruccion tal cual (los cuerpos quedan
+    identicos a los de siempre). Con imagenes, cada esquema tiene su
+    bloque: codex «input_image», openai «image_url» con data-URL y
+    anthropic «image» en base64.
+    """
+    if not llamada.imagenes:
+        return llamada.instruccion
+    bloques = []
+    if llamada.instruccion:
+        if esquema == "codex":
+            bloques.append({"type": "input_text",
+                            "text": llamada.instruccion})
+        else:
+            bloques.append({"type": "text", "text": llamada.instruccion})
+    for ruta in llamada.imagenes:
+        mime, datos = _leer_imagen(ruta)
+        data_url = f"data:{mime};base64,{datos}"
+        if esquema == "codex":
+            bloques.append({"type": "input_image", "image_url": data_url})
+        elif esquema == "anthropic":
+            bloques.append({"type": "image",
+                            "source": {"type": "base64",
+                                       "media_type": mime, "data": datos}})
+        else:  # openai y compatibles (z.ai GLM)
+            bloques.append({"type": "image_url",
+                            "image_url": {"url": data_url}})
+    return bloques
 
 
 def _cuerpo_de(respuesta, esquema: str) -> dict:
