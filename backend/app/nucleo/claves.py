@@ -141,7 +141,11 @@ def probar_claves(carpeta: Path | str) -> dict:
 
     if claves.get("glm"):
         try:
-            r = requests.get("https://api.z.ai/api/paas/v4/models",
+            # misma base que usan los textos (motores/llm.py): el Coding
+            # Plan y el pago por token no viven en la misma URL
+            from ..motores.llm import PROVEEDORES
+            base = str(PROVEEDORES["glm"]["base"]).rstrip("/")
+            r = requests.get(f"{base}/models",
                              headers={"Authorization": f"Bearer {claves['glm']}"},
                              timeout=30)
             resultados["glm"] = {"ok": r.status_code == 200,

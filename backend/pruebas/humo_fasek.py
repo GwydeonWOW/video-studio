@@ -211,6 +211,18 @@ check("la llamada va al backend de Codex con sus cabeceras",
 os.environ.pop("ESTUDIO_CODEX_TOKEN")
 os.environ.pop("ESTUDIO_CODEX_CUENTA")
 
+# glm (Coding Plan): misma clave, endpoint propio de la suscripcion
+_red_llm.cola_post.append(_Respuesta(cuerpo={
+    "choices": [{"message": {"content": "hola glm"}}],
+    "usage": {"prompt_tokens": 3, "completion_tokens": 2}}))
+texto = llm.llamar(llm.Llamada(proveedor="glm", modelo="glm-5.3",
+                               instruccion="di hola"),
+                   claves={"glm": "clave-glm"})
+check("llamar(glm) ataca el endpoint del Coding Plan",
+      texto == "hola glm" and _red_llm.peticiones[-1]["url"]
+      == "https://api.z.ai/api/coding/paas/v4/chat/completions",
+      _red_llm.peticiones[-1]["url"])
+
 # -------------------------------- codex: caducidad y desconexión
 
 _red_codex.cola_post.append(_Respuesta(cuerpo={

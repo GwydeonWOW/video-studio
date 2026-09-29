@@ -38,7 +38,12 @@ PROVEEDORES = {
     "glm": {
         "nombre": "GLM (z.ai)",
         "esquema": "openai",
-        "base": "https://api.z.ai/api/paas/v4",
+        #: z.ai tiene DOS APIs con la misma clave: el Coding Plan
+        #: (suscripcion, sin tokens comprados) vive en /api/coding/paas/v4
+        #: y el pago por token, en /api/paas/v4. Mismo esquema OpenAI en
+        #: ambas; se salta de una a otra con ESTUDIO_GL_BASE.
+        "base": os.environ.get("ESTUDIO_GL_BASE",
+                               "https://api.z.ai/api/coding/paas/v4"),
         "modelos": ["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-4.6",
                     "glm-5.3v"],
         "defecto": "glm-5.3",
