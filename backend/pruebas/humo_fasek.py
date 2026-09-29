@@ -107,19 +107,21 @@ ID_TOKEN = _jwt({
     "https://api.openai.com/auth": {"chatgpt_account_id": "cuenta-1"},
 })
 
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
 _red_codex.cola_post.append(_Respuesta(cuerpo={
-    "device_code": "dev-123", "user_code": "ABCD-EFGH",
-    "verification_uri": "https://auth.openai.com/device",
-    "verification_uri_complete":
-        "https://auth.openai.com/device?code=ABCD-EFGH",
-    "expires_in": 900, "interval": 5,
+    "device_auth_id": "deviceauth-123", "user_code": "ABCD-EFGH",
+    "interval": "5",
+    "expires_at": (datetime.now(timezone.utc)
+                   + timedelta(minutes=15)).isoformat(),
 }))
 r = cliente.post("/api/codex/conectar")
 flujo = r.json()
 check("POST codex/conectar: el código que se pinta",
       r.status_code == 200 and flujo.get("user_code") == "ABCD-EFGH"
-      and flujo.get("verification_uri_complete", "").endswith("ABCD-EFGH")
-      and flujo.get("intervalo_s", 0) >= 2,
+      and flujo.get("verification_uri", "").endswith("/codex/device")
+      and flujo.get("intervalo_s", 0) >= 2
+      and flujo.get("expira_s", 0) > 800,
       str(r.text)[:120])
 
 r = cliente.get("/api/codex")
@@ -127,12 +129,18 @@ check("GET codex: flujo pendiente, sesión aún no",
       r.status_code == 200 and r.json().get("pendiente") is True
       and r.json().get("conectado") is False)
 
+# en el endpoint nuevo, «aún sin confirmar» es 404 (o 403)
 _red_codex.cola_post.append(
-    _Respuesta(codigo=400, cuerpo={"error": "authorization_pending"}))
+    _Respuesta(codigo=404, cuerpo={"error": "not found"}))
 r = cliente.post("/api/codex/sondeo")
 check("sondeo antes de confirmar en el navegador: pendiente",
       r.status_code == 200 and r.json().get("estado") == "pendiente")
 
+# confirmado: el sondeo devuelve el authorization_code con su
+# code_verifier, y el canje (form) trae la sesión
+_red_codex.cola_post.append(_Respuesta(cuerpo={
+    "authorization_code": "authz-1", "code_challenge": "reto",
+    "code_verifier": "verificador-1"}))
 _red_codex.cola_post.append(_Respuesta(cuerpo={
     "access_token": "acc-1", "refresh_token": "ref-1",
     "expires_in": 3600, "id_token": ID_TOKEN}))
@@ -141,6 +149,15 @@ check("sondeo tras confirmar: conectado y quien",
       r.status_code == 200 and r.json().get("estado") == "conectado"
       and r.json().get("correo") == "prueba@ejemplo.com",
       str(r.text)[:120])
+canje = next((p for p in _red_codex.peticiones
+              if p["url"].endswith("/oauth/token")), None)
+check("el canje del código es form contra /oauth/token",
+      canje is not None
+      and canje.get("data", {}).get("redirect_uri", "")
+          .endswith("/deviceauth/callback")
+      and canje.get("data", {}).get("code") == "authz-1"
+      and canje.get("data", {}).get("code_verifier") == "verificador-1",
+      str(canje)[:160])
 
 r = cliente.get("/api/codex")
 check("GET codex conectado: correo y caducidad",
@@ -197,9 +214,8 @@ os.environ.pop("ESTUDIO_CODEX_CUENTA")
 # -------------------------------- codex: caducidad y desconexión
 
 _red_codex.cola_post.append(_Respuesta(cuerpo={
-    "device_code": "dev-456", "user_code": "ZZZZ-ZZZZ",
-    "verification_uri": "https://auth.openai.com/device",
-    "expires_in": 900, "interval": 5}))
+    "device_auth_id": "deviceauth-456", "user_code": "ZZZZ-ZZZZ",
+    "interval": "5", "expires_at": ""}))
 r = cliente.post("/api/codex/conectar")
 check("segunda conexión para probar la caducidad",
       r.status_code == 200 and r.json().get("user_code") == "ZZZZ-ZZZZ")

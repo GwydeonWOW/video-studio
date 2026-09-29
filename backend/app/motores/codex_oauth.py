@@ -29,7 +29,18 @@ except ImportError:  # uso suelto
     from ..nucleo.proyecto import escribir_json, leer_json  # type: ignore
 
 AUTH = "https://auth.openai.com"
-ALCANCE = "openid profile email offline_access"
+
+#: OpenAI jubilo el device flow clasico (`/oauth/device/code`: hoy
+#: contesta 404 «Invalid URL»). El CLI de Codex lo sustituyo por el
+#: mismo teatro con otros focos: se pide un `user_code` en
+#: `/api/accounts/deviceauth/usercode`, la persona lo confirma en
+#: `/codex/device`, y el sondeo a `/api/accounts/deviceauth/token`
+#: devuelve un `authorization_code` CON su `code_verifier` (el PKCE lo
+#: resuelve el servidor) que se canjea en `/oauth/token`.
+URL_CODIGO = f"{AUTH}/api/accounts/deviceauth/usercode"
+URL_CANJE_DISPOSITIVO = f"{AUTH}/api/accounts/deviceauth/token"
+URL_CONFIRMAR = f"{AUTH}/codex/device"
+REDIRECCION_DISPOSITIVO = f"{AUTH}/deviceauth/callback"
 
 #: auth.openai.com esta detras de Cloudflare y el User-Agent por defecto
 #: de requests (`python-requests/x.y`) cae en su lista de bots: contesta
@@ -95,30 +106,28 @@ def iniciar(carpeta: Path | str) -> dict:
     global _pendiente
     try:
         respuesta = requests.post(
-            f"{AUTH}/oauth/device/code",
-            headers=CABECERAS,
-            data={"client_id": CLIENTE_ID, "scope": ALCANCE},
-            timeout=30)
+            URL_CODIGO, headers=CABECERAS,
+            json={"client_id": CLIENTE_ID}, timeout=30)
     except requests.RequestException as fallo:
         raise ErrorCodex(f"red: {fallo}") from fallo
     if respuesta.status_code != 200:
         raise ErrorCodex(f"auth.openai.com {respuesta.status_code}: "
                          f"{respuesta.text[:200]}")
     datos = respuesta.json()
-    for campo in ("device_code", "user_code", "verification_uri"):
+    for campo in ("device_auth_id", "user_code"):
         if not datos.get(campo):
             raise ErrorCodex(f"respuesta sin {campo}: {datos}")
     _pendiente = {
-        "device_code": datos["device_code"],
-        "caduca": time.time() + float(datos.get("expires_in", 600)),
+        "device_auth_id": str(datos["device_auth_id"]),
+        "user_code": str(datos["user_code"]),
+        "caduca": _caducidad(str(datos.get("expires_at", ""))),
     }
     return {
-        "user_code": str(datos["user_code"]),
-        "verification_uri": str(datos["verification_uri"]),
-        "verification_uri_complete":
-            str(datos.get("verification_uri_complete") or ""),
-        "expira_s": int(datos.get("expires_in", 600)),
-        "intervalo_s": max(2, int(datos.get("interval", 5))),
+        "user_code": _pendiente["user_code"],
+        "verification_uri": URL_CONFIRMAR,
+        "verification_uri_complete": "",
+        "expira_s": max(0, int(_pendiente["caduca"] - time.time())),
+        "intervalo_s": max(2, int(str(datos.get("interval", "5")) or 5)),
     }
 
 
@@ -132,16 +141,23 @@ def sondear(carpeta: Path | str) -> dict:
         return {"estado": "expirado"}
     try:
         respuesta = requests.post(
-            f"{AUTH}/oauth/token",
-            headers=CABECERAS,
-            data={"grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                  "client_id": CLIENTE_ID,
-                  "device_code": _pendiente["device_code"]},
+            URL_CANJE_DISPOSITIVO, headers=CABECERAS,
+            json={"device_auth_id": _pendiente["device_auth_id"],
+                  "user_code": _pendiente["user_code"]},
             timeout=30)
     except requests.RequestException as fallo:
         raise ErrorCodex(f"red: {fallo}") from fallo
+    # 403/404 es «aun no ha confirmado» en este endpoint (el CLI hace
+    # lo mismo: sondea cada `interval` hasta un cuarto de hora)
+    if respuesta.status_code in (403, 404):
+        return {"estado": "pendiente"}
     if respuesta.status_code == 200:
-        sesion = _sesion_de(respuesta.json())
+        datos = respuesta.json()
+        for campo in ("authorization_code", "code_verifier"):
+            if not datos.get(campo):
+                raise ErrorCodex(f"respuesta sin {campo}: {datos}")
+        sesion = _canjear_codigo(str(datos["authorization_code"]),
+                                 str(datos["code_verifier"]))
         _guardar(carpeta, sesion)
         _pendiente = {}
         return {"estado": "conectado", "correo": sesion.get("correo", "")}
@@ -150,8 +166,6 @@ def sondear(carpeta: Path | str) -> dict:
     except ValueError:
         error = ""
     error = error or respuesta.text[:120].strip()
-    if error in ("authorization_pending", "slow_down"):
-        return {"estado": "pendiente"}
     _pendiente = {}
     if error == "expired_token":
         return {"estado": "expirado"}
@@ -191,7 +205,7 @@ def refrescar(carpeta: Path | str, datos: dict) -> dict:
         respuesta = requests.post(
             f"{AUTH}/oauth/token",
             headers=CABECERAS,
-            data={"grant_type": "refresh_token",
+            json={"grant_type": "refresh_token",
                   "client_id": CLIENTE_ID, "refresh_token": refresh},
             timeout=30)
     except requests.RequestException as fallo:
@@ -221,6 +235,35 @@ def desconectar(carpeta: Path | str) -> dict:
 
 
 # ------------------------------------------------------------------ helpers
+
+def _caducidad(momento: str) -> float:
+    """`expires_at` ISO del endpoint -> epoch; sin el, 15 minutos."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(momento).timestamp()
+    except ValueError:
+        return time.time() + 900
+
+
+def _canjear_codigo(codigo: str, verificador: str) -> dict:
+    """authorization_code del device flow -> sesion (form, como el CLI)."""
+    try:
+        respuesta = requests.post(
+            f"{AUTH}/oauth/token",
+            headers=CABECERAS,
+            data={"grant_type": "authorization_code",
+                  "client_id": CLIENTE_ID,
+                  "code": codigo,
+                  "redirect_uri": REDIRECCION_DISPOSITIVO,
+                  "code_verifier": verificador},
+            timeout=30)
+    except requests.RequestException as fallo:
+        raise ErrorCodex(f"red: {fallo}") from fallo
+    if respuesta.status_code != 200:
+        raise ErrorCodex(f"auth.openai.com {respuesta.status_code}: "
+                         f"{respuesta.text[:200]}")
+    return _sesion_de(respuesta.json())
+
 
 def _sesion_de(tokens: dict, previa: dict | None = None) -> dict:
     """Normaliza la respuesta del token endpoint a nuestro fichero."""
