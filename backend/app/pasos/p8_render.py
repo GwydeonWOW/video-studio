@@ -209,26 +209,32 @@ def _cartela_png(plantilla: str, datos: dict | None, destino: Path,
     return destino
 
 
-def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None,
-              destino: Path, calidad: str, trabajo,
+def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
+              rotulo: dict | None, destino: Path, calidad: str, trabajo,
               cfg_grafismo: dict | None = None) -> Path:
-    """Un segmento de video: imagen animada + rotulo + audio de la escena.
+    """Un segmento de vídeo: imagen animada + rótulo + su ventana de audio.
 
-    Los planos de CARTELA no traen imagen: el plano entero es un PNG de
-    texto (la misma plantilla que ensena la pantalla), estatico.
+    El plano lleva su ventana `t_in`/`t_out` DENTRO del audio de la
+    escena (el corte de `segmentar`): el audio se corta a esa ventana y
+    la imagen dura lo mismo. Los planos de CARTELA no traen imagen: el
+    plano entero es un PNG de texto, estático.
     """
     cfg = cfg_grafismo or {}
     audio = proyecto.ruta(escena["audio"])
-    duracion = float(escena["duracion"])
+    t_in = max(0.0, float(plano.get("t_in") or 0.0))
+    t_out = float(plano.get("t_out") or 0.0) \
+        or float(escena["duracion"])
+    duracion = max(0.1, t_out - t_in)
     ajustes = CALIDADES.get(calidad, CALIDADES["estandar"])
     cartela = plano.get("cartela")
     if cartela:
         png = _cartela_png(cartela.get("plantilla", "titulo"),
                            cartela.get("datos", {}),
-                           destino.parent / f"{plano['escena']}_cartela.png",
+                           destino.parent / f"{plano['id']}_cartela.png",
                            paleta=cfg.get("paleta"))
         orden = [comun.ffmpeg(), "-y", "-loglevel", "error",
                  "-loop", "1", "-t", f"{duracion:.3f}", "-i", str(png),
+                 "-ss", f"{t_in:.3f}", "-t", f"{duracion:.3f}",
                  "-i", str(audio),
                  "-vf", "setsar=1", "-r", str(FPS),
                  "-map", "0:v", "-map", "1:a",
@@ -239,16 +245,26 @@ def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None
         proceso = subprocess.run(orden, capture_output=True, text=True,
                                  timeout=1800)
         if proceso.returncode != 0 or not destino.exists():
-            raise RuntimeError(f"ffmpeg fallo en {plano['escena']}: "
+            raise RuntimeError(f"ffmpeg fallo en {plano['id']}: "
                                f"{proceso.stderr[-400:]}")
         return destino
     imagen = proyecto.ruta(plano["imagen"])
-    zoom_entra = hash(plano["escena"]) % 2 == 0  # alterna acercar/alejar
-    if zoom_entra:
-        expresion = "'min(1.0+0.09*on/({d}*{f}),1.09)'"
+    # el zoom del PLAN (segmentar.alternar_zoom: acercar/alejar alternado,
+    # un cierre sutil de 95 % que empuja sin que se vea empujar)
+    zoom_cfg = plano.get("zoom") if isinstance(plano.get("zoom"), dict) \
+        else None
+    if zoom_cfg and zoom_cfg.get("de") is not None \
+            and zoom_cfg.get("a") is not None:
+        de, hasta = float(zoom_cfg["de"]), float(zoom_cfg["a"])
     else:
-        expresion = "'max(1.09-0.09*on/({d}*{f}),1.0)'"
-    zoom = expresion.format(d=duracion, f=FPS)
+        # planos viejos sin plan: alterna por hash, como siempre
+        hasta = 1.09 if hash(plano["id"]) % 2 == 0 else 1.0
+        de = 1.0 if hasta > 1.0 else 1.09
+    rampa = f"{de}+({hasta}-{de})*on/({duracion:g}*{FPS})"
+    if hasta >= de:
+        zoom = f"'min({rampa},{max(de, hasta)})'"
+    else:
+        zoom = f"'max({rampa},{min(de, hasta)})'"
     filtros = [
         # escalar de mas y encoger con zoompan: sin escalones
         f"scale={ANCHO * 2}:{ALTO * 2}",
@@ -257,11 +273,12 @@ def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None
         "setsar=1",
     ]
     orden = [comun.ffmpeg(), "-y", "-loglevel", "error",
-             "-loop", "1", "-t", f"{duracion:.3f}", "-i", str(imagen)]
+             "-loop", "1", "-t", f"{duracion:.3f}", "-i", str(imagen),
+             "-ss", f"{t_in:.3f}", "-t", f"{duracion:.3f}", "-i", str(audio)]
     base = f"[0:v]{','.join(filtros)}"
     if rotulo:
         png = _rotulo_png(rotulo["texto"],
-                          destino.parent / f"{plano['escena']}_rotulo.png",
+                          destino.parent / f"{plano['id']}_rotulo.png",
                           diseno=cfg.get("diseno", "pastilla"),
                           paleta=cfg.get("paleta"),
                           tam=cfg.get("tam", "normal"))
@@ -281,8 +298,7 @@ def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None
     else:
         grafo = f"{base}[v]"
         indice_audio = "1:a"
-    orden += ["-i", str(audio),
-              "-filter_complex", grafo,
+    orden += ["-filter_complex", grafo,
               "-map", "[v]", "-map", indice_audio,
               "-c:v", "libx264", "-preset", ajustes["preset"],
               "-crf", ajustes["crf"], "-pix_fmt", "yuv420p",
@@ -291,7 +307,7 @@ def _segmento(proyecto: Proyecto, escena: dict, plano: dict, rotulo: dict | None
     proceso = subprocess.run(orden, capture_output=True, text=True,
                              timeout=1800)
     if proceso.returncode != 0 or not destino.exists():
-        raise RuntimeError(f"ffmpeg fallo en {plano['escena']}: "
+        raise RuntimeError(f"ffmpeg fallo en {plano['id']}: "
                            f"{proceso.stderr[-400:]}")
     return destino
 
@@ -376,7 +392,11 @@ def _montar_audio(proyecto: Proyecto, voz: dict, params: dict, cortes: list,
             assets = p2_brief.proyecto_leer_datos(proyecto, "assets")
             for p in assets.get("planos", []):
                 if isinstance(p, dict) and p.get("cartela"):
+                    # por escena Y por plano: los cortes viajan con id de
+                    # plano y el efecto no puede quedarse mirando una
+                    # clave que ya no existe
                     cartela_de[str(p.get("escena"))] = True
+                    cartela_de[str(p.get("id") or p.get("escena"))] = True
             trabajo.avance("mezclando los efectos del banco")
             lista = sonido.eventos(cortes, reparto, params,
                                    semilla=_semilla_de(proyecto),
@@ -463,8 +483,30 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     if not voz.get("escenas") or not assets.get("planos"):
         raise ValueError("falta voz o assets: genera primero los pasos previos")
     calidad = params.get("calidad", "estandar")
-    planos_de = {p["escena"]: p for p in assets["planos"]}
-    rotulos_de = {r["id"]: r for r in callouts.get("rotulos", [])}
+    voz_de = {v["id"]: v for v in voz["escenas"]}
+    # cada escena empieza DONDE acaba la anterior en la pista de voz
+    offset_de, acumulado = {}, 0.0
+    for v in voz["escenas"]:
+        offset_de[v["id"]] = acumulado
+        acumulado += float(v["duracion"])
+    planos = [p for p in assets["planos"] if isinstance(p, dict)]
+    for p in planos:
+        p.setdefault("id", p.get("escena", ""))
+        p.setdefault("escena", p["id"])
+    # EL RÓTULO VA AL PLANO QUE CONTIENE SU INSTANTE: el rótulo vive en
+    # tiempo de ESCENA y el plano en su ventana de dentro
+    rotulos_de = {}
+    for r in callouts.get("rotulos", []):
+        sid = str(r.get("id") or "")
+        del_escena = [p for p in planos if p["escena"] == sid]
+        if not del_escena:
+            continue
+        aparece = max(0.0, float(r.get("aparece") or 0.0))
+        elegido = next((p for p in del_escena
+                        if float(p.get("t_out") or 0.0) > aparece),
+                       del_escena[-1])
+        local = max(0.0, aparece - float(elegido.get("t_in") or 0.0))
+        rotulos_de[elegido["id"]] = {**r, "aparece": round(local, 2)}
     # el grafismo del vídeo, ESCRITO en los datos de callouts al generarse:
     # el render no relee params de otro paso (una vista vieja tiene que
     # poder reproducir qué diseño dibujó)
@@ -474,22 +516,34 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     temporal = Path(tempfile.mkdtemp(prefix="render_"))
     segmentos, sids, cortes = [], [], []
     total = 0.0
-    for indice, escena in enumerate(voz["escenas"], start=1):
+    for indice, plano in enumerate(planos, start=1):
         trabajo.comprobar_cancelacion()
-        plano = planos_de.get(escena["id"])
-        if not plano:
-            raise ValueError(f"la escena {escena['id']} no tiene imagen")
-        trabajo.avance(f"renderizando {indice}/{len(voz['escenas'])}: "
-                       f"{escena['id']} ({escena['duracion']} s)")
-        destino = temporal / f"{indice:04d}_{escena['id']}.mp4"
-        _segmento(proyecto, escena, plano, rotulos_de.get(escena["id"]),
+        sid = plano["escena"]
+        escena = voz_de.get(sid)
+        if escena is None:
+            raise ValueError(f"el plano {plano['id']} no tiene voz "
+                             f"(escena {sid} sin audio)")
+        if not plano.get("cartela") and not plano.get("imagen"):
+            raise ValueError(f"el plano {plano['id']} no tiene imagen")
+        dur = (max(0.0, float(plano.get("t_out") or 0.0)
+                   - float(plano.get("t_in") or 0.0))
+               or float(escena["duracion"]))
+        trabajo.avance(f"renderizando {indice}/{len(planos)}: "
+                       f"{plano['id']} ({round(dur, 1)} s)")
+        destino = temporal / f"{indice:04d}_{plano['id']}.mp4"
+        _segmento(proyecto, plano, escena, rotulos_de.get(plano["id"]),
                   destino, calidad, trabajo, cfg_grafismo)
         segmentos.append(destino)
-        sids.append(escena["id"])
-        dur = float(escena["duracion"])
-        cortes.append({"id": escena["id"], "t_in": round(total, 3),
-                       "t_out": round(total + dur, 3),
-                       "duracion": dur})
+        sids.append(plano["id"])
+        # el CORTE en tiempo global del vídeo: con la ranura que dejó
+        # escrita el corte del guion (suave/acento), si la dejó
+        global_in = offset_de.get(sid, 0.0) + float(plano.get("t_in") or 0.0)
+        cortes.append({"id": plano["id"], "escena": sid,
+                       "t_in": round(global_in, 3),
+                       "t_out": round(global_in + dur, 3),
+                       "duracion": dur,
+                       **({"transicion": plano["transicion"]}
+                          if plano.get("transicion") else {})})
         total += dur
     # QUÉ TRANSICIÓN LLEVA CADA PLANO: determinista (semilla del vídeo), y
     # sólo toca la firma del render — cambiar la paleta no toca las imágenes
@@ -583,6 +637,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
                    f"{destino_final.name}")
     return {"video": "pasos/render/final.mp4", "duracion": duracion,
             "fps": FPS, "resolucion": f"{ANCHO}x{ALTO}",
-            "escenas": len(segmentos), "masterizado": masterizado,
+            "escenas": len(voz["escenas"]), "planos": len(segmentos),
+            "masterizado": masterizado,
             "sonido": sonido.describir(params),
             "transiciones": transiciones.describir(params)}

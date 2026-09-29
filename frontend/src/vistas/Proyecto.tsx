@@ -1342,14 +1342,36 @@ function DialogoVisor({
   const escena = datos?.escenas[indice]
   const ultima = datos ? indice >= datos.escenas.length - 1 : true
 
-  // al cambiar de escena: rebobinar el reloj y seguir si iba seguido
+  // al cambiar de plano: colocarse en su ventana dentro del audio de la
+  // escena y seguir si iba seguido (el plano ENTRA en su t_in, no en 0)
   useEffect(() => {
-    setTAudio(0)
     const audio = audio_ref.current
+    const desde = escena?.t_in ?? 0
+    setTAudio(desde)
     if (!audio || !escena?.audio) return
+    const colocar = () => {
+      audio.currentTime = desde
+    }
+    colocar()
+    audio.addEventListener("loadedmetadata", colocar, { once: true })
     if (seguido) audio.play().catch(() => setSeguido(false))
+    return () => audio.removeEventListener("loadedmetadata", colocar)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [indice])
+
+  // el plano dura hasta SU t_out: ahí cambia (seguido) o se para
+  const al_mover_reloj = (e: React.SyntheticEvent<HTMLAudioElement>) => {
+    const t = e.currentTarget.currentTime
+    setTAudio(t)
+    const fin = escena?.t_out ?? Infinity
+    if (t >= fin - 0.03) {
+      if (seguido && !ultima) setIndice(indice + 1)
+      else {
+        e.currentTarget.pause()
+        setSeguido(false)
+      }
+    }
+  }
 
   const al_terminar_audio = () => {
     if (seguido && !ultima) setIndice(indice + 1)
@@ -1370,8 +1392,8 @@ function DialogoVisor({
 
   const rotulo_visible =
     escena?.rotulo != null &&
-    t_audio >= escena.rotulo.aparece &&
-    t_audio < escena.rotulo.aparece + escena.rotulo.dura
+    t_audio - escena.t_in >= escena.rotulo.aparece &&
+    t_audio - escena.t_in < escena.rotulo.aparece + escena.rotulo.dura
 
   /** Compone el fotograma de la previsualización: imagen + rótulo tal
    * como se ven (la captura es de lo que se está MIRANDO). */
@@ -1441,9 +1463,13 @@ function DialogoVisor({
                   alt={escena.titulo || escena.id}
                   className="h-full w-full object-contain"
                 />
+              ) : escena.cartela ? (
+                <div className="flex h-full items-center justify-center text-sm text-white/60">
+                  cartela de texto ({escena.cartela}) — la dibuja el render
+                </div>
               ) : (
                 <div className="flex h-full items-center justify-center text-sm text-white/60">
-                  sin imagen para esta escena (genera las imágenes)
+                  sin imagen para este plano (genera las imágenes)
                 </div>
               )}
               {rotulo_visible && escena.rotulo && (
@@ -1461,7 +1487,7 @@ function DialogoVisor({
             <audio
               ref={audio_ref}
               src={escena.audio ? `/a/${pid}/${escena.audio}` : undefined}
-              onTimeUpdate={(e) => setTAudio(e.currentTarget.currentTime)}
+              onTimeUpdate={al_mover_reloj}
               onEnded={al_terminar_audio}
               controls
               className="w-full"

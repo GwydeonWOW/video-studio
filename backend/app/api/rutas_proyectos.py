@@ -82,12 +82,40 @@ def _id_libre(base: str) -> str:
 
 
 def _contar_unidades(datos) -> int:
+    """Cuenta UNIDADES, no filas: una escena cortada en planos son
+    varias filas de `planos` pero UNA unidad de corrección (su escena)."""
     if not isinstance(datos, dict):
         return 0
-    for campo in _CAMPOS_UNIDADES:
+    for campo, clave in _CAMPOS_UNIDADES.items():
         if isinstance(datos.get(campo), list):
-            return len(datos[campo])
+            return len({str(u.get(clave, "")) for u in datos[campo]
+                        if isinstance(u, dict)})
     return 0
+
+
+def _sustituir_unidad(datos: dict, unidad: str, ficha) -> None:
+    """Cambia las filas de UNA unidad por lo que trajo la corrección.
+
+    `ficha` es un dict (una escena del guion, una voz...) o la LISTA de
+    planos de una escena (p6): el bloque entra donde estaba la PRIMERA
+    fila vieja, para no desordenar el montaje.
+    """
+    for campo, clave in _CAMPOS_UNIDADES.items():
+        viejos = datos.get(campo)
+        if not isinstance(viejos, list):
+            continue
+        nuevas = ficha if isinstance(ficha, list) else [ficha]
+        posicion = next((i for i, u in enumerate(viejos)
+                         if isinstance(u, dict)
+                         and str(u.get(clave, "")) == unidad), None)
+        resto = [u for u in viejos
+                 if not (isinstance(u, dict)
+                         and str(u.get(clave, "")) == unidad)]
+        if posicion is None:
+            resto.extend(nuevas)        # unidad nueva: al final
+        else:
+            resto[posicion:posicion] = nuevas
+        datos[campo] = resto
 
 
 def _fusionar_unidades(previo: dict, nuevo: dict, unidades: list[str]) -> dict:
@@ -103,13 +131,26 @@ def _fusionar_unidades(previo: dict, nuevo: dict, unidades: list[str]) -> dict:
         recientes = nuevo.get(campo)
         if not (isinstance(viejos, list) and isinstance(recientes, list)):
             continue
-        traidos = {str(u.get(clave, "")): u for u in recientes
-                   if isinstance(u, dict)}
+        # una unidad puede traer VARIAS filas (una escena, varios
+        # planos): agrupar por unidad y meter cada bloque donde estaba
+        # su primera fila vieja
+        traidos: dict[str, list] = {}
+        for u in recientes:
+            if isinstance(u, dict):
+                traidos.setdefault(str(u.get(clave, "")), []).append(u)
         lista = []
+        gastadas: set[str] = set()
         for unidad in viejos:
             llave = str(unidad.get(clave, "")) if isinstance(unidad, dict) else ""
-            lista.append(traidos.pop(llave, unidad) if llave in cambios else unidad)
-        lista.extend(traidos.values())  # unidades nuevas que no existian
+            if llave in cambios:
+                if llave in gastadas:
+                    continue        # fila hermana: su bloque ya entró antes
+                gastadas.add(llave)
+                lista.extend(traidos.pop(llave, [unidad]))
+            else:
+                lista.append(unidad)
+        for bloque in traidos.values():  # unidades nuevas que no existian
+            lista.extend(bloque)
         mezcla[campo] = lista
     # campos escalares frescos (calidad, estado...) mandan
     for clave, valor in nuevo.items():
@@ -490,33 +531,64 @@ def leer_previsualizacion(pid: str) -> dict:
     assets = estado.datos_de("assets") or {}
     callouts = estado.datos_de("callouts") or {}
     guion = estado.datos_de("guion") or {}
-    planos_de = {p.get("escena"): p for p in assets.get("planos", [])}
-    rotulos_de = {r.get("id"): r for r in callouts.get("rotulos", [])}
     titulo_de = {e.get("id"): e.get("titulo", "")
                  for e in guion.get("escenas", [])}
     narracion_de = {e.get("id"): e.get("narracion", "")
                     for e in guion.get("escenas", [])}
+    # los planos agrupados por escena, en ORDEN: una escena son ahora
+    # VARIAS imágenes (el corte de `segmentar`), y quien mira tiene que
+    # ver el ritmo de verdad — no una imagen hasta que acabe el audio
+    planos_de: dict[str, list] = {}
+    for p in assets.get("planos", []):
+        if isinstance(p, dict) and p.get("escena"):
+            planos_de.setdefault(str(p["escena"]), []).append(p)
+    rotulos_de = {r.get("id"): r for r in callouts.get("rotulos", [])}
     escenas = []
     for escena in voz["escenas"]:
         sid = str(escena.get("id") or "")
-        plano = planos_de.get(sid) or {}
-        imagen = plano.get("imagen")
-        if not imagen or not proyecto.ruta(str(imagen)).exists():
-            imagen = None
+        duracion_voz = float(escena.get("duracion") or 0.0)
+        del_escena = planos_de.get(sid) or [{}]
         rotulo = rotulos_de.get(sid)
-        escenas.append({
-            "id": sid,
-            "titulo": titulo_de.get(sid, ""),
-            "narracion": narracion_de.get(sid, ""),
-            "imagen": imagen,
-            "audio": escena.get("audio"),
-            "duracion": round(float(escena.get("duracion") or 0.0), 3),
-            "palabras": escena.get("palabras") or [],
-            "rotulo": ({"texto": str(rotulo.get("texto", "")),
-                        "aparece": round(float(rotulo.get("aparece", 0.0)), 2),
-                        "dura": round(float(rotulo.get("dura", 4.0)), 2)}
-                       if rotulo else None),
-        })
+        aparece = max(0.0, float((rotulo or {}).get("aparece") or 0.0))
+        for plano in del_escena:
+            # la ventana del plano DENTRO del audio de la escena; los
+            # planos viejos (una imagen por escena) no la traen
+            t_in = max(0.0, float(plano.get("t_in") or 0.0))
+            t_out = (float(plano.get("t_out") or 0.0)
+                     or (t_in + duracion_voz))
+            imagen = plano.get("imagen")
+            if not imagen or not proyecto.ruta(str(imagen)).exists():
+                imagen = None
+            # el rótulo viaja con el plano que CONTIENE su instante (la
+            # misma cuenta que el render), en reloj del plano
+            rotulo_de_plano = None
+            if rotulo and (t_out > aparece or plano is del_escena[-1]):
+                rotulo_de_plano = {
+                    "texto": str(rotulo.get("texto", "")),
+                    "aparece": round(max(0.0, aparece - t_in), 2),
+                    "dura": round(float(rotulo.get("dura", 4.0)), 2)}
+                rotulo = None          # sólo el primer plano que lo pille
+            palabras = [w for w in (escena.get("palabras") or [])
+                        if isinstance(w, dict)
+                        and float(w.get("fin") or 0) > t_in
+                        and float(w.get("inicio") or 0) < t_out]
+            escenas.append({
+                "id": str(plano.get("id") or sid),
+                "escena": sid,
+                "titulo": titulo_de.get(sid, ""),
+                "narracion": str(plano.get("narracion")
+                                  or narracion_de.get(sid, "")),
+                "imagen": imagen,
+                "cartela": (plano.get("cartela") or {}).get("plantilla")
+                if isinstance(plano.get("cartela"), dict) else None,
+                "audio": escena.get("audio"),
+                "t_in": round(t_in, 3),
+                "t_out": round(min(t_out, duracion_voz or t_out), 3),
+                "duracion": round(max(0.1, min(t_out, duracion_voz or t_out)
+                                       - t_in), 3),
+                "palabras": palabras,
+                "rotulo": rotulo_de_plano,
+            })
     render_params = estado.paso("render").get("params") or {}
     return {
         "escenas": escenas,
@@ -751,11 +823,7 @@ def _correr_unidad(proyecto: Proyecto, paso: str, unidad: str,
         trabajo.avance(f"corrigiendo {paso}/{unidad}")
         ficha = funcion_unidad(trabajo)
         datos = estado.datos_de(paso) or {}
-        for campo, clave in _CAMPOS_UNIDADES.items():
-            if isinstance(datos.get(campo), list):
-                datos[campo] = [ficha if (isinstance(u, dict)
-                                          and str(u.get(clave, "")) == unidad)
-                                else u for u in datos[campo]]
+        _sustituir_unidad(datos, unidad, ficha)
         version = estado.completar(paso, paso_params, datos,
                                    unidades=_contar_unidades(datos))
         for consumidor in _CONSUMIDORES.get(paso, []):
@@ -880,11 +948,7 @@ def _corregir_unidad(proyecto: Proyecto, paso: str, unidad: str,
         else:
             ficha = p6_assets.regenerar_plano(proyecto, unidad, params)
         datos = estado.datos_de(paso) or {}
-        for campo, clave in _CAMPOS_UNIDADES.items():
-            if isinstance(datos.get(campo), list):
-                datos[campo] = [ficha if (isinstance(u, dict)
-                                          and str(u.get(clave, "")) == unidad)
-                                else u for u in datos[campo]]
+        _sustituir_unidad(datos, unidad, ficha)
         version = estado.completar(paso, params, datos,
                                    unidades=_contar_unidades(datos))
         for consumidor in _CONSUMIDORES.get(paso, []):

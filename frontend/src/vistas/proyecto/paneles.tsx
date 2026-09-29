@@ -993,13 +993,23 @@ export function PanelAssets({
   const obsoletas = ficha.unidades_obsoletas ?? []
   const hay_obsoletas = obsoletas.length > 0
   const cartelas = (datos.planos ?? []).filter((p) => p.cartela).length
+  const escenas = new Set((datos.planos ?? []).map((p) => p.escena)).size
+  const ritmo = datos.ritmo
+  const informe = datos.informe as
+    | { duracion_media?: number; fuera_de_rango?: number }
+    | undefined
 
   return (
     <div className="space-y-4">
       <ZonaPresetPaso pid={pid} tipo="estilo" recargar={recargar} />
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm text-muted-foreground">
-          {datos.planos?.length ?? 0} planos · calidad {datos.calidad}
+          {datos.planos?.length ?? 0} planos en {escenas} escena(s) · calidad{" "}
+          {datos.calidad}
+          {ritmo && ` · ritmo ${ritmo.minimo}–${ritmo.maximo} s`}
+          {informe?.duracion_media
+            ? ` (media ${informe.duracion_media} s)`
+            : ""}
           {cartelas > 0 && ` · ${cartelas} cartela(s) de texto`}
         </p>
         <Boton
@@ -1040,17 +1050,18 @@ export function PanelAssets({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {(datos.planos ?? []).map((plano) => {
           const obsoleto = obsoletas.includes(plano.escena)
+          const pid_plano = plano.id ?? plano.escena
           return (
             <div
-              key={plano.escena}
+              key={pid_plano}
               className={`overflow-hidden rounded-lg border ${
                 obsoleto ? "ring-2 ring-amber-500" : ""
               }`}
             >
               {plano.cartela ? (
                 <img
-                  src={`/api/proyectos/${pid}/cartelas/vista?plano=${plano.escena}`}
-                  alt={`cartela ${plano.escena}`}
+                  src={`/api/proyectos/${pid}/cartelas/vista?plano=${pid_plano}`}
+                  alt={`cartela ${pid_plano}`}
                   title={`cartela ${plano.cartela.plantilla}`}
                   className="aspect-video w-full bg-muted object-cover"
                   onError={(e) =>
@@ -1060,7 +1071,7 @@ export function PanelAssets({
               ) : (
                 <img
                   src={`/a/${pid}/${plano.imagen}`}
-                  alt={plano.escena}
+                  alt={pid_plano}
                   title={plano.prompt}
                   className="aspect-video w-full bg-muted object-cover"
                   onError={(e) =>
@@ -1070,7 +1081,16 @@ export function PanelAssets({
               )}
               <div className="flex items-center justify-between gap-2 p-2">
                 <span className="font-mono text-xs text-muted-foreground">
-                  {plano.escena}
+                  {pid_plano}
+                  {plano.duracion ? ` · ${plano.duracion.toFixed(1)} s` : ""}
+                  {plano.narracion ? (
+                    <span
+                      className="block truncate font-sans"
+                      title={plano.narracion}
+                    >
+                      {plano.narracion}
+                    </span>
+                  ) : null}
                   {plano.cartela && " · cartela"}
                 </span>
                 <div className="flex items-center gap-1">
@@ -1103,7 +1123,7 @@ export function PanelAssets({
                     variante="fantasma"
                     tamano="pequeno"
                     deshabilitado={ocupado}
-                    title="Regenerar (cuesta una imagen)"
+                    title="Regenerar los planos de la escena (cuesta una imagen por plano)"
                     onClick={async () => {
                       try {
                         const trabajo = await api.post<{ id: string }>(

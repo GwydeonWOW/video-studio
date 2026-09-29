@@ -107,9 +107,19 @@ export interface DatosRevision {
 }
 
 export interface Plano {
+  /** sub-id del plano (S012-1); igual a `escena` si la escena sale en un solo plano */
+  id?: string
   escena: string
   imagen: string
   prompt: string
+  /** ventana del plano DENTRO del audio de su escena */
+  t_in?: number
+  t_out?: number
+  duracion?: number
+  /** texto que narra este plano (el trozo de la escena) */
+  narracion?: string
+  zoom?: { de: number; a: number }
+  transicion?: string
   cartela?: { plantilla: string; datos: Record<string, string>; por_que?: string } | null
 }
 
@@ -117,6 +127,10 @@ export interface DatosAssets {
   planos: Plano[]
   calidad: string
   cartelas?: number
+  /** informe del ritmo de montaje (horquilla, cortes, heredados...) */
+  informe?: Record<string, unknown>
+  /** horquilla de plano con la que se cortó ({minimo, maximo} en s) */
+  ritmo?: { minimo: number; maximo: number }
 }
 
 export interface Rotulo {
@@ -250,13 +264,20 @@ export interface FichaReceta {
   activo: TrabajoFicha | null
 }
 
-/** Una escena de la previsualización (GET /{pid}/previsualizacion). */
+/** Un plano de la previsualización (GET /{pid}/previsualizacion) — una
+ * escena son ahora varios planos, cada uno con su ventana de audio. */
 export interface EscenaPrevia {
   id: string
+  /** la escena de la que sale el plano (y cuyo audio suena) */
+  escena: string
   titulo: string
   narracion: string
   imagen: string | null
+  cartela: string | null
   audio: string | null
+  /** la ventana del plano DENTRO del audio de su escena */
+  t_in: number
+  t_out: number
   duracion: number
   palabras: { palabra: string; inicio: number; fin: number }[]
   rotulo: { texto: string; aparece: number; dura: number } | null
