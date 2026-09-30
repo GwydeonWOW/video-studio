@@ -1433,30 +1433,69 @@ def leer_cartelas(pid: str) -> dict:
     estado = Estado(proyecto)
     params = estado.paso("assets").get("params", {})
     planos = _planos_del_guion(proyecto)
+    permitidas = ((estado.paso("callouts").get("params", {}) or {})
+                  .get("plantillas_cartela")) or []
     return {"plan": cartelas.plan_de(params),
-            "plantillas": grafismo.PLANTILLAS_CARTELA,
+            "plantillas": cartelas.catalogo_plantillas(
+                paleta=_paleta_actual(estado)),
+            "plantillas_activas": permitidas,
+            "iconos": sorted(cartelas.ICONOS),
+            "defecto": cartelas.PLANTILLA_POR_DEFECTO,
             "planos": planos,
             "max_cartelas": max(1, round(len(planos)
                                          * cartelas.FRACCION_MAXIMA)),
             "obsoletos": estado.unidades_obsoletas("assets")}
 
 
+def _imagen_debajo(ruta) -> str:
+    """La imagen del plano como trozo de SVG (data URI), para debajo de
+    la carta en la vista: la cartela de hoy va SOBRE la imagen, y una
+    vista sin ella enseñaría un fondo que el vídeo no lleva."""
+    import base64                                                # noqa: PLC0415
+    try:
+        crudo = base64.b64encode(Path(ruta).read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+    return (f'<image x="0" y="0" width="{cartelas.TAMANO[0]}" '
+            f'height="{cartelas.TAMANO[1]}" '
+            f'href="data:image/png;base64,{crudo}" '
+            f'preserveAspectRatio="xMidYMid slice"/>')
+
+
 @router.get("/{pid}/cartelas/vista", dependencies=[_SESION])
 def vista_cartela(pid: str, plano: str) -> Response:
-    """La cartela de un plano como SVG: lo que dibuja el render."""
+    """La cartela de un plano como SVG: lo que dibuja el render.
+
+    Si el paso 6 ya cortó, viaja con los tiempos de VERDAD (los que
+    escribirá el render, dejados en `escritura`) y la imagen del plano
+    debajo; si no, quieta y con el ritmo de muestra.
+    """
     proyecto = _proyecto_o_404(pid)
     estado = Estado(proyecto)
     params = estado.paso("assets").get("params", {})
-    ficha = cartelas.plan_de(params).get(str(plano).strip().upper())
+    sid = str(plano).strip().upper()
+    ficha = cartelas.plan_de(params).get(sid)
     if not ficha:
         raise HTTPException(404, f"el plano {plano} no lleva cartela")
     voz = p2_brief.proyecto_leer_datos(proyecto, "voz") or {}
     duracion = next((float(v.get("duracion", 0) or 0)
                      for v in voz.get("escenas", [])
-                     if v.get("id") == str(plano).strip().upper()), 4.0)
-    svg = grafismo.svg_cartela(ficha.get("plantilla", "titulo"),
-                               ficha.get("datos"), _paleta_actual(estado),
-                               duracion or 4.0)
+                     if v.get("id") == sid), 4.0)
+    tiempos, debajo = None, ""
+    assets = p2_brief.proyecto_leer_datos(proyecto, "assets") or {}
+    plano_de = next((p for p in assets.get("planos", [])
+                     if isinstance(p, dict) and p.get("cartela")
+                     and str(p.get("escena")) == sid), None)
+    if plano_de:
+        escritura = plano_de.get("escritura") if isinstance(
+            plano_de.get("escritura"), dict) else {}
+        tiempos = escritura.get("tiempos") or None
+        duracion = float(plano_de.get("duracion") or duracion or 4.0)
+        if plano_de.get("imagen"):
+            debajo = _imagen_debajo(proyecto.ruta(plano_de["imagen"]))
+    svg = cartelas.svg_carta(ficha, paleta=_paleta_actual(estado),
+                             duracion=duracion or 4.0, debajo=debajo,
+                             tiempos=tiempos, animada=True)
     return Response(content=svg, media_type="image/svg+xml")
 
 
@@ -1464,10 +1503,17 @@ def vista_cartela(pid: str, plano: str) -> Response:
 def proponer_cartelas(pid: str) -> dict:
     """El agente decide qué tramos van mejor como cartela (trabajo de cola)."""
     proyecto = _proyecto_o_404(pid)
-    params = Estado(proyecto).paso("assets").get("params", {})
+    estado = Estado(proyecto)
+    params = estado.paso("assets").get("params", {})
+    # LA ALLOWLIST vive con el grafismo, en los params de rótulos: limita
+    # lo que el agente puede elegir sin ensuciar una sola imagen (regla
+    # del original, que la pasaba explícita aparte del saco de assets).
+    plantillas = ((estado.paso("callouts").get("params", {}) or {})
+                  .get("plantillas_cartela"))
 
     def funcion(trabajo):
-        return cartelas.proponer(proyecto, params, trabajo)
+        return cartelas.proponer(proyecto, params, trabajo,
+                                 plantillas=plantillas)
 
     trabajo = GESTOR.lanzar(pid, "cartelas", funcion, unidades=[])
     return GESTOR.estado(trabajo.id)
@@ -1475,49 +1521,74 @@ def proponer_cartelas(pid: str) -> dict:
 
 @router.put("/{pid}/cartelas", dependencies=_MUTAR)
 def guardar_cartelas(pid: str, cuerpo: dict) -> dict:
-    """Fija (o quita) la cartela de planos concretos.
+    """Fija (o quita) la cartela de planos concretos y qué plantillas
+    se pueden usar.
 
-    Decidirla antes de generar AHORRA la imagen de ese plano: por eso
-    vive con assets y por eso se ensucia el plano tocado.
+    El plan va al bloque `unidades` de assets: POR UNIDAD, convertir
+    S013 en cartela ensucia S013 y nada más. Y las plantillas permitidas
+    van a los params de RÓTULOS, con el resto del grafismo: solo
+    limitan lo que puede elegir el agente la próxima vez, así que no
+    tienen por qué ensuciar una sola imagen.
     """
     proyecto = _proyecto_o_404(pid)
     estado = Estado(proyecto)
     ids = _ids_de_planos(proyecto)
-    plan = (cuerpo or {}).get("plan")
-    if not isinstance(plan, dict) or not plan:
-        raise HTTPException(400, "se esperaba {plan: {plano: ficha|null}}")
-    unidades, tocados, avisos = {}, [], []
-    for uid, ficha in plan.items():
-        sid = str(uid).strip().upper()
-        if sid not in ids:
-            avisos.append(f"{sid}: no es un plano de este vídeo, se ignora")
-            continue
-        if ficha is None:  # quitar la cartela: el plano vuelve a pagar imagen
-            unidades[sid] = {"cartela": None}
+    datos = cuerpo or {}
+    unidades, tocados, avisos, hecho = {}, [], [], []
+    plan = datos.get("plan")
+    if isinstance(plan, dict) and plan:
+        for uid, ficha in plan.items():
+            sid = str(uid).strip().upper()
+            if sid not in ids:
+                avisos.append(f"{sid}: no es un plano de este vídeo, se ignora")
+                continue
+            if ficha is None:  # quitar la cartela: el plano vuelve a pagar imagen
+                unidades[sid] = {"cartela": None}
+                tocados.append(sid)
+                continue
+            if not isinstance(ficha, dict):
+                avisos.append(f"{sid}: no trae ficha, se ignora")
+                continue
+            plantilla = str(ficha.get("plantilla", ""))
+            if plantilla not in cartelas.PLANTILLAS:
+                raise HTTPException(
+                    400, f"plantilla de cartela desconocida: {plantilla}. "
+                    f"Las que hay son: {', '.join(cartelas.PLANTILLAS)}")
+            valores, motivos = cartelas.validar(plantilla, ficha.get("datos"))
+            if valores is None:
+                avisos.append(f"{sid}: {'; '.join(motivos)}")
+                continue
+            avisos.extend(f"{sid}: {m}" for m in motivos)
+            unidades[sid] = {"cartela": {
+                "plantilla": plantilla,
+                "datos": valores,
+                "por_que": str(ficha.get("por_que", "")).strip()}}
             tocados.append(sid)
-            continue
-        if not isinstance(ficha, dict):
-            avisos.append(f"{sid}: no trae ficha, se ignora")
-            continue
-        valores, motivos = cartelas.validar(str(ficha.get("plantilla", "")),
-                                            ficha.get("datos"))
-        if valores is None:
-            avisos.append(f"{sid}: {'; '.join(motivos)}")
-            continue
-        avisos.extend(f"{sid}: {m}" for m in motivos)
-        unidades[sid] = {"cartela": {
-            "plantilla": str(ficha.get("plantilla", "")),
-            "datos": valores,
-            "por_que": str(ficha.get("por_que", "")).strip()}}
-        tocados.append(sid)
-    if not tocados:
-        raise HTTPException(400, "; ".join(avisos) or "nada que guardar")
-    estado.actualizar_params("assets", {"unidades": unidades})
-    estado.marcar_obsoleto("assets", tocados)
-    proyecto.bitacora("cartelas_guardadas", {"planos": tocados})
+        if not tocados:
+            raise HTTPException(400, "; ".join(avisos) or "nada que guardar")
+        hecho.append("plan")
+    if isinstance(datos.get("plantillas"), list):
+        desconocidas = [t for t in datos["plantillas"]
+                        if t not in cartelas.PLANTILLAS]
+        if desconocidas:
+            raise HTTPException(
+                400, f"plantillas desconocidas: {', '.join(desconocidas)}. "
+                f"Las que hay son: {', '.join(cartelas.PLANTILLAS)}")
+        estado.actualizar_params(
+            "callouts", {"plantillas_cartela": list(datos["plantillas"])})
+        hecho.append("plantillas")
+    if not hecho:
+        raise HTTPException(400, "se esperaba {plan: ...} o {plantillas: [...]}")
+    if tocados:
+        estado.actualizar_params("assets", {"unidades": unidades})
+        estado.marcar_obsoleto("assets", tocados)
+        proyecto.bitacora("cartelas_guardadas", {"planos": tocados})
     params = estado.paso("assets").get("params", {})
     return {"plan": cartelas.plan_de(params), "tocados": tocados,
-            "avisos": avisos,
+            "avisos": avisos, "guardado": hecho,
+            "plantillas_activas": (estado.paso("callouts")
+                                   .get("params", {}) or {}
+                                   ).get("plantillas_cartela") or [],
             "obsoletos": estado.unidades_obsoletas("assets")}
 
 

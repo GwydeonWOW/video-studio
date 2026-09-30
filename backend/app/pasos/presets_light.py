@@ -620,11 +620,11 @@ def plan_de(encargo, solo=None):
 #: subtítulo en otro idioma ya no enseña eso — ni la longitud de línea,
 #: ni dónde parte, ni cómo se ve la caja con esa cantidad de texto.
 #:
-#: Las cartelas NO se sacan de `grafismo.PLANTILLAS_CARTELA[x]["muestra"]`,
-#: que son de la pantalla de plantillas del modo editor. Aquí hay un
-#: juego propio y traducido, corto a propósito: dos plantillas por
-#: idioma bastan para ver la tipografía, la paleta y el fondo, que es lo
-#: que se juzga. Un idioma que no esté cae en castellano.
+#: Las cartelas NO son un dibujo aparte: salen del MISMO motor que las
+#: escribe en el vídeo (`pasos/cartelas.py`), con un juego propio y
+#: traducido, corto a propósito — dos plantillas por idioma bastan para
+#: ver la tipografía, la paleta y el velo, que es lo que se juzga. Un
+#: idioma que no esté cae en castellano.
 MUESTRAS_POR_IDIOMA = {
     "es": {
         "locucion": (
@@ -638,11 +638,11 @@ MUESTRAS_POR_IDIOMA = {
             "Cada palabra aparece sincronizada con la locución",
         ),
         "cartelas": (
-            {"plantilla": "dato",
-             "datos": {"cifra": "10.000.000", "pie": "cuentas a la venta"}},
+            {"plantilla": "cifra",
+             "datos": {"cifra": "10.000.000", "label": "cuentas a la venta"}},
             {"plantilla": "cita",
              "datos": {"texto": "Una contraseña era toda la cerradura",
-                       "autor": "El peritaje"}},
+                       "quien": "el peritaje"}},
         ),
     },
     "en": {
@@ -657,11 +657,11 @@ MUESTRAS_POR_IDIOMA = {
             "Every word appears in sync with the narration",
         ),
         "cartelas": (
-            {"plantilla": "dato",
-             "datos": {"cifra": "10,000,000", "pie": "accounts up for sale"}},
+            {"plantilla": "cifra",
+             "datos": {"cifra": "10,000,000", "label": "accounts up for sale"}},
             {"plantilla": "cita",
              "datos": {"texto": "One password was the whole lock",
-                       "autor": "The audit"}},
+                       "quien": "the audit"}},
         ),
     },
 }
@@ -723,15 +723,17 @@ def componer(laminas, destino, grafismo_params, semilla=""):
     Componer dos veces sería pagar dos veces el mismo dibujo.
 
     `laminas` son las láminas LIMPIAS del estilo —las mismas que copia
-    cada plano del vídeo— en el orden en que se van a enseñar. Cada una
-    se compone con `p8_render._rotulo_png` y `_cartela_png`, que son
-    EXACTAMENTE lo que monta el render: componer aquí a mano con otra
-    tipografía habría dado una miniatura que no se parece al vídeo.
+    cada plano del vídeo— en el orden en que se van a enseñar. El
+    subtítulo se compone con `p8_render._rotulo_png` y la cartela con
+    `cartelas.png_carta`, que son EXACTAMENTE lo que monta el render:
+    componer aquí a mano con otra tipografía habría dado una miniatura
+    que no se parece al vídeo.
 
     `grafismo_params` trae {diseno, paleta, subtitulo_tam, idioma}.
     """
     from PIL import Image                                   # noqa: PLC0415
 
+    from . import cartelas as cartelas_motor
     from . import p8_render
     destino = Path(destino)
     destino.parent.mkdir(parents=True, exist_ok=True)
@@ -754,12 +756,14 @@ def componer(laminas, destino, grafismo_params, semilla=""):
         base = Image.open(lamina).convert("RGB")
         base = base.resize((p8_render.ANCHO, p8_render.ALTO), Image.LANCZOS)
         if indice in cartelas_en:
-            # UN PLANO DE TEXTO: la cartela ES el plano entero, igual
-            # que en el render — no lleva subtítulo encima.
+            # UN PLANO DE TEXTO: la cartela va SOBRE la lámina con su
+            # velo, escrita del todo — igual que en el render, y sin
+            # subtítulo encima.
             ficha = textos["cartelas"][indice % len(textos["cartelas"])]
-            celdas.append(p8_render._cartela_png(
-                ficha["plantilla"], ficha["datos"],
-                trabajo / f"celda{indice + 1}.png", paleta))
+            salida = trabajo / f"celda{indice + 1}.png"
+            cartelas_motor.png_carta(ficha, paleta=paleta, base=base) \
+                .save(salida, "PNG")
+            celdas.append(salida)
             continue
         frase = textos["frases"][indice % len(textos["frases"])]
         rotulo = Image.open(p8_render._rotulo_png(

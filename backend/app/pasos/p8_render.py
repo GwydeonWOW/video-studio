@@ -31,7 +31,7 @@ from pathlib import Path
 
 from ..config import AJUSTES
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief, sonido, subtitulos, transiciones
+from . import cartelas, comun, p2_brief, sonido, subtitulos, transiciones
 
 FPS = 30
 ANCHO, ALTO = 1920, 1080
@@ -254,56 +254,6 @@ def _ventanas_trozos(trozos: list, duracion: float) -> list:
     return salida
 
 
-def _cartela_png(plantilla: str, datos: dict | None, destino: Path,
-                 paleta: dict | None = None) -> Path:
-    """Una cartela completa (1920x1080): el plano entero ES texto.
-
-    El mismo dibujo que grafismo.svg_cartela, en raster para ffmpeg.
-    Sin marca de tiempo de lectura: esa es de la pantalla, no del vídeo.
-    """
-    from PIL import Image, ImageDraw
-    from ..nucleo import grafismo
-    paleta = paleta or dict(grafismo.PALETA_DEFECTO)
-    datos = datos or {}
-    imagen = Image.new("RGB", (ANCHO, ALTO), _color(paleta.get("fondo"))[:3])
-    dibujo = ImageDraw.Draw(imagen)
-    acento = _color(paleta.get("acento"))[:3]
-    tinta = _color(paleta.get("texto"))[:3]
-    cx, cy = ANCHO // 2, ALTO // 2
-
-    def centro(texto, cy_, tamano, color):
-        fuente = _fuente_de(tamano)
-        bbox = dibujo.textbbox((0, 0), str(texto), font=fuente)
-        ancho, alto = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        dibujo.text(((ANCHO - ancho) // 2 - bbox[0], cy_ - alto // 2 - bbox[1]),
-                    str(texto), font=fuente, fill=color)
-
-    if plantilla == "cita":
-        centro("“", cy - 130, 150, acento)
-        centro(datos.get("texto", ""), cy + 20, 72, tinta)
-        if datos.get("autor"):
-            centro(f"— {datos['autor']}", cy + 150, 38, acento)
-    elif plantilla == "dato":
-        centro(datos.get("cifra", ""), cy - 30, 220, acento)
-        if datos.get("pie"):
-            centro(datos.get("pie", ""), cy + 170, 52, tinta)
-    elif plantilla == "capitulo":
-        centro(f"C A P Í T U L O  {datos.get('numero', '')}", cy - 120, 44,
-               acento)
-        dibujo.rectangle([cx - 90, cy - 60, cx + 90, cy - 56], fill=acento)
-        centro(datos.get("titulo", ""), cy + 70, 96, tinta)
-    elif plantilla == "cierre":
-        centro(datos.get("titulo", ""), cy - 30, 110, tinta)
-        if datos.get("sub"):
-            centro(datos.get("sub", ""), cy + 120, 48, acento)
-    else:  # titulo
-        dibujo.rectangle([cx - 70, cy - 170, cx + 70, cy - 164], fill=acento)
-        centro(datos.get("titulo", ""), cy, 130, tinta)
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    imagen.save(destino)
-    return destino
-
-
 def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
               trozos: list | None, destino: Path, calidad: str, trabajo,
               cfg_grafismo: dict | None = None) -> Path:
@@ -311,9 +261,10 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
 
     El plano lleva su ventana `t_in`/`t_out` DENTRO del audio de la
     escena (el corte de `segmentar`): el audio se corta a esa ventana y
-    la imagen dura lo mismo. Los planos de CARTELA no traen imagen: el
-    plano entero es un PNG de texto, estático — y no llevan subtítulo
-    (la cartela ES el texto).
+    la imagen dura lo mismo. El plano de CARTELA se pinta FOTOGRAMA A
+    FOTOGRAMA — el texto se escribe al ritmo de la voz, sobre la imagen
+    del plano con su velo y su Ken Burns (los tiempos los dejó p6 en
+    `escritura`) — y no lleva subtítulo (la cartela ES el texto).
 
     Los TROZOS de subtítulo llegan en reloj del plano (los dejó p7 con
     las marcas de la voz): cada uno es un PNG con su fundido, montado a
@@ -328,12 +279,25 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
     ajustes = CALIDADES.get(calidad, CALIDADES["estandar"])
     cartela = plano.get("cartela")
     if cartela:
-        png = _cartela_png(cartela.get("plantilla", "titulo"),
-                           cartela.get("datos", {}),
-                           destino.parent / f"{plano['id']}_cartela.png",
-                           paleta=cfg.get("paleta"))
+        escritura = plano.get("escritura") if isinstance(
+            plano.get("escritura"), dict) else {}
+        zoom_cfg = plano.get("zoom") if isinstance(plano.get("zoom"), dict) \
+            else None
+        par_zoom = ((float(zoom_cfg["de"]), float(zoom_cfg["a"]))
+                    if zoom_cfg and zoom_cfg.get("de") is not None
+                    and zoom_cfg.get("a") is not None else None)
+        base = (proyecto.ruta(plano["imagen"])
+                if plano.get("imagen") else None)
+        fotogramas = destino.parent / f"{plano['id']}_frames"
+        trabajo.avance(f"cartela {plano['id']}: fotograma a fotograma")
+        cartelas.secuencia(
+            fotogramas, cartela, duracion, fps=FPS,
+            paleta=cfg.get("paleta"), semilla=_semilla_de(proyecto),
+            tiempos=escritura.get("tiempos") or None,
+            base=base, zoom=par_zoom)
         orden = [comun.ffmpeg(), "-y", "-loglevel", "error",
-                 "-loop", "1", "-t", f"{duracion:.3f}", "-i", str(png),
+                 "-framerate", str(FPS), "-i",
+                 str(fotogramas / "f%05d.png"),
                  "-ss", f"{t_in:.3f}", "-t", f"{duracion:.3f}",
                  "-i", str(audio),
                  "-vf", "setsar=1", "-r", str(FPS),
@@ -507,9 +471,16 @@ def _montar_audio(proyecto: Proyecto, voz: dict, params: dict, cortes: list,
                 if isinstance(p, dict) and p.get("cartela"):
                     # por escena Y por plano: los cortes viajan con id de
                     # plano y el efecto no puede quedarse mirando una
-                    # clave que ya no existe
-                    cartela_de[str(p.get("escena"))] = True
-                    cartela_de[str(p.get("id") or p.get("escena"))] = True
+                    # clave que ya no existe. Viaja la ficha y los
+                    # tiempos de `escritura` (los dejó p6): con ellos el
+                    # tecleo de la máquina de escribir cae donde caen
+                    # las palabras de verdad.
+                    escritura = p.get("escritura") if isinstance(
+                        p.get("escritura"), dict) else {}
+                    ficha = {"cartela": p["cartela"],
+                             "tiempos": escritura.get("tiempos") or []}
+                    cartela_de[str(p.get("id") or p.get("escena"))] = ficha
+                    cartela_de[str(p.get("escena"))] = ficha
             trabajo.avance("mezclando los efectos del banco")
             lista = sonido.eventos(cortes, reparto, params,
                                    semilla=_semilla_de(proyecto),

@@ -64,9 +64,9 @@ check("GET sonido vacío", r.status_code == 200
       and ficha["musica"] == {}
       and ficha["efectos"] == []
       and ficha["lufs"] == -23.0)
-check("GET sonido: 3 papeles y ánimos",
+check("GET sonido: 5 papeles y ánimos",
       set(ficha["papeles"]) == {"transicion_suave", "transicion_acento",
-                                "entrada_cartela"}
+                                "entrada_cartela", "tecla", "retorno"}
       and len(ficha["animos"]) >= 5
       and ficha["hay_jamendo"] is False
       and ficha["hay_freesound"] is False)

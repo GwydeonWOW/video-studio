@@ -13,6 +13,7 @@ import type {
   FichaCartela,
   FichaCartelas,
   FichaDiseno,
+  PlantillaCartela,
   PlanoGrafismo,
   RespuestaPlan,
   TrabajoFicha,
@@ -35,6 +36,13 @@ import {
   DisparadorPestanas,
   ContenidoPestanas,
 } from "../../components/ui/pestanas"
+import {
+  Selector,
+  ValorSelector,
+  DisparadorSelector,
+  ContenidoSelector,
+  Opcion,
+} from "../../components/ui/selector"
 
 export type PestanaGrafismo = "direccion" | "redactor" | "cartelas" | "diseno"
 
@@ -270,9 +278,39 @@ function PestanaPlan({
 
 /* ------------------------------------------------------------- cartelas */
 
+/** El icono del selector cuando la cartela no lleva: radix no admite "".
+ * Un icono inventado no se dibuja, así que el catálogo es cerrado. */
+const SIN_ICONO = "__sin__"
+
+/** El texto de un dato que puede venir en lista (el agente propone arrays). */
+const como_texto = (v: string | string[] | undefined) =>
+  Array.isArray(v) ? v.join(" ") : (v ?? "")
+
+/** Los datos en blanco de una plantilla. El primer campo obligatorio se
+ * siembra con el título del plano, que es lo que más veces acierta. */
+function datos_en_blanco(
+  plantilla: PlantillaCartela,
+  semilla: string,
+): Record<string, string | string[]> {
+  const datos: Record<string, string | string[]> = {}
+  let primera = true
+  for (const [campo, info] of Object.entries(plantilla.campos)) {
+    if (plantilla.lista && plantilla.lista[0] === campo) {
+      datos[campo] = Array.from({ length: plantilla.lista[1] }, () => "")
+    } else if (campo === "icono") {
+      continue
+    } else {
+      datos[campo] = primera && info.obligatorio ? semilla : ""
+      primera = false
+    }
+  }
+  return datos
+}
+
 function PestanaCartelas({ pid, recargar }: { pid: string; recargar: () => void }) {
   const [ficha, setFicha] = useState<FichaCartelas | null>(null)
   const [borrador, setBorrador] = useState<Record<string, FichaCartela | null>>({})
+  const [permitidas, setPermitidas] = useState<string[]>([])
   const [cargando, setCargando] = useState(true)
   const [tid, setTid] = useState<string | null>(null)
 
@@ -282,6 +320,7 @@ function PestanaCartelas({ pid, recargar }: { pid: string; recargar: () => void 
       const r = await api.get<FichaCartelas>(`/api/proyectos/${pid}/cartelas`)
       setFicha(r)
       setBorrador({ ...r.plan })
+      setPermitidas(r.plantillas_activas ?? [])
     } catch (e) {
       toast.error(String((e as Error).message ?? e))
     } finally {
@@ -313,16 +352,30 @@ function PestanaCartelas({ pid, recargar }: { pid: string; recargar: () => void 
   const guardadas = ficha.plan ?? {}
   const cambios = Object.keys(borrador).filter((id) => JSON.stringify(borrador[id] ?? null) !== JSON.stringify(guardadas[id] ?? null))
   const cartelas_activas = Object.values(borrador).filter(Boolean).length
+  const plantillas = ficha.plantillas ?? []
+  const plantilla_de: Record<string, PlantillaCartela> = {}
+  for (const p of plantillas) plantilla_de[p.id] = p
+  const defecto = plantilla_de[ficha.defecto] ? ficha.defecto : plantillas[0]?.id ?? ""
+
+  const permitidas_cambiadas =
+    JSON.stringify([...permitidas].sort()) !==
+    JSON.stringify([...(ficha.plantillas_activas ?? [])].sort())
 
   const guardar = async () => {
-    const plan: Record<string, FichaCartela | null> = {}
-    for (const id of cambios) plan[id] = borrador[id] ?? null
+    const cuerpo: { plan?: Record<string, FichaCartela | null>; plantillas?: string[] } = {}
+    if (cambios.length > 0) {
+      const plan: Record<string, FichaCartela | null> = {}
+      for (const id of cambios) plan[id] = borrador[id] ?? null
+      cuerpo.plan = plan
+    }
+    if (permitidas_cambiadas) cuerpo.plantillas = permitidas
     try {
-      const r = await api.put<{ plan: Record<string, FichaCartela>; tocados?: string[]; avisos?: string[]; obsoletos?: string[] }>(
+      const r = await api.put<{ plan: Record<string, FichaCartela>; tocados?: string[]; avisos?: string[]; obsoletos?: string[]; plantillas_activas?: string[] }>(
         `/api/proyectos/${pid}/cartelas`,
-        { plan },
+        cuerpo,
       )
-      setFicha({ ...ficha, plan: r.plan, obsoletos: r.obsoletos ?? [] })
+      setFicha({ ...ficha, plan: r.plan, obsoletos: r.obsoletos ?? [],
+                 plantillas_activas: r.plantillas_activas ?? permitidas })
       toast.success(
         `${r.tocados?.length ?? 0} plano(s) tocado(s)${r.avisos?.length ? " — " + r.avisos.join(" · ") : ""}`,
       )
@@ -336,8 +389,8 @@ function PestanaCartelas({ pid, recargar }: { pid: string; recargar: () => void 
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm text-muted-foreground">
-          Un plano de <b>texto</b> en vez de una imagen pagada. {cartelas_activas}/{ficha.max_cartelas} de{" "}
-          {ficha.planos.length} planos.
+          Un plano de <b>texto escrito</b> palabra a palabra sobre la imagen del plano.{" "}
+          {cartelas_activas}/{ficha.max_cartelas} de {ficha.planos.length} escenas.
         </p>
         <div className="ml-auto flex gap-2">
           <Boton
@@ -360,16 +413,65 @@ function PestanaCartelas({ pid, recargar }: { pid: string; recargar: () => void 
             )}
             Planear con IA
           </Boton>
-          <Boton tamano="pequeno" deshabilitado={cambios.length === 0} onClick={guardar}>
+          <Boton
+            tamano="pequeno"
+            deshabilitado={cambios.length === 0 && !permitidas_cambiadas}
+            onClick={guardar}
+          >
             Guardar {cambios.length > 0 ? `(${cambios.length})` : ""}
           </Boton>
         </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-xs text-muted-foreground">
+          Plantillas que el agente puede proponer:
+        </span>
+        {plantillas.map((p) => {
+          const todas = permitidas.length === 0
+          const on = todas || permitidas.includes(p.id)
+          return (
+            <Boton
+              key={p.id}
+              variante={on ? "secundario" : "fantasma"}
+              tamano="pequeno"
+              title={p.cuando}
+              onClick={() => {
+                if (todas) {
+                  // partir de "todas" y excluir esta
+                  setPermitidas(plantillas.map((q) => q.id).filter((x) => x !== p.id))
+                } else if (permitidas.includes(p.id)) {
+                  const resto = permitidas.filter((x) => x !== p.id)
+                  // vacío vuelve a significar "todas"
+                  setPermitidas(resto.length === 0 ? [] : resto)
+                } else {
+                  const suma = [...permitidas, p.id]
+                  setPermitidas(suma.length === plantillas.length ? [] : suma)
+                }
+              }}
+            >
+              {p.nombre}
+            </Boton>
+          )
+        })}
+        <span className="text-xs text-muted-foreground">
+          {permitidas.length === 0
+            ? "(todas)"
+            : `(${permitidas.length}/${plantillas.length})`}
+        </span>
       </div>
       <div className="space-y-2">
         {ficha.planos.map((plano) => {
           const ficha_cartela = borrador[plano.id] ?? null
           const plantilla_id = ficha_cartela?.plantilla ?? ""
-          const plantilla = ficha.plantillas?.[plantilla_id]
+          const plantilla = plantilla_id ? plantilla_de[plantilla_id] : undefined
+          const campo_lista = plantilla?.lista?.[0]
+          const poner_dato = (campo: string, valor: string | string[]) => {
+            if (!ficha_cartela) return
+            setBorrador({
+              ...borrador,
+              [plano.id]: { ...ficha_cartela, datos: { ...ficha_cartela.datos, [campo]: valor } },
+            })
+          }
           return (
             <div key={plano.id} className="rounded-md border bg-card p-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -383,7 +485,12 @@ function PestanaCartelas({ pid, recargar }: { pid: string; recargar: () => void 
                   onClick={() =>
                     setBorrador({
                       ...borrador,
-                      [plano.id]: ficha_cartela ? null : { plantilla: "titulo", datos: { titulo: plano.titulo || "" } },
+                      [plano.id]: ficha_cartela
+                        ? null
+                        : {
+                            plantilla: defecto,
+                            datos: datos_en_blanco(plantilla_de[defecto], plano.titulo || ""),
+                          },
                     })
                   }
                 >
@@ -393,39 +500,127 @@ function PestanaCartelas({ pid, recargar }: { pid: string; recargar: () => void 
               {ficha_cartela && plantilla && (
                 <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_260px]">
                   <div className="space-y-2">
-                    <div className="flex flex-wrap gap-1">
-                      {Object.entries(ficha.plantillas).map(([id, p]) => (
+                    <div className="grid grid-cols-3 gap-1 sm:grid-cols-5">
+                      {plantillas.map((p) => (
                         <Boton
-                          key={id}
-                          variante={id === plantilla_id ? "defecto" : "fantasma"}
+                          key={p.id}
+                          variante={p.id === plantilla_id ? "defecto" : "fantasma"}
                           tamano="pequeno"
+                          className="h-auto flex-col gap-1 p-1"
+                          title={p.cuando}
                           onClick={() =>
                             setBorrador({
                               ...borrador,
-                              [plano.id]: { plantilla: id, datos: Object.fromEntries(p.campos.map((c) => [c, ""])) },
+                              [plano.id]: {
+                                plantilla: p.id,
+                                datos: datos_en_blanco(p, plano.titulo || ""),
+                              },
                             })
                           }
                         >
-                          {p.nombre}
+                          {/* la muestra la dibuja el MISMO código que la
+                              cartela de verdad: lo que se ve es lo que sale */}
+                          <div
+                            className="h-10 w-full overflow-hidden rounded-sm bg-muted [&_svg]:h-full [&_svg]:w-full"
+                            dangerouslySetInnerHTML={{ __html: p.svg }}
+                          />
+                          <span className="w-full truncate text-[10px]">{p.nombre}</span>
                         </Boton>
                       ))}
                     </div>
-                    {plantilla.campos.map((campo) => (
-                      <div key={campo} className="grid grid-cols-[90px_1fr] items-center gap-2">
-                        <Etiqueta className="text-xs">{campo}</Etiqueta>
-                        <Entrada
-                          valor={ficha_cartela.datos?.[campo] ?? ""}
-                          alCambiar={(e) =>
-                            setBorrador({
-                              ...borrador,
-                              [plano.id]: { ...ficha_cartela, datos: { ...ficha_cartela.datos, [campo]: e.target.value } },
-                            })
-                          }
-                          placeholder={ficha.plantillas?.[plantilla_id]?.muestra?.[campo] ?? ""}
-                          className="text-xs"
-                        />
-                      </div>
-                    ))}
+                    <p className="text-[11px] text-muted-foreground">{plantilla.cuando}</p>
+                    {Object.entries(plantilla.campos).map(([campo, info]) => {
+                      if (campo === campo_lista && plantilla.lista) {
+                        const [, minimo, maximo] = plantilla.lista
+                        const lineas = Array.isArray(ficha_cartela.datos?.[campo])
+                          ? (ficha_cartela.datos[campo] as string[])
+                          : Array.from({ length: minimo }, () => "")
+                        return (
+                          <div key={campo} className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <Etiqueta className="text-xs">
+                                {campo}
+                                {info.obligatorio ? " *" : ""}
+                              </Etiqueta>
+                              {lineas.length < maximo && (
+                                <Boton
+                                  variante="fantasma"
+                                  tamano="pequeno"
+                                  className="h-5 px-1.5 text-[10px]"
+                                  onClick={() => poner_dato(campo, [...lineas, ""])}
+                                >
+                                  + línea
+                                </Boton>
+                              )}
+                            </div>
+                            {lineas.map((linea, i) => (
+                              <div key={i} className="flex items-center gap-1">
+                                <span className="w-4 text-[11px] text-muted-foreground">{i + 1}</span>
+                                <Entrada
+                                  valor={linea}
+                                  maxLength={info.tope}
+                                  className="text-xs"
+                                  alCambiar={(e) =>
+                                    poner_dato(
+                                      campo,
+                                      lineas.map((l, j) => (j === i ? e.target.value : l)),
+                                    )
+                                  }
+                                />
+                                {lineas.length > minimo && (
+                                  <Boton
+                                    variante="fantasma"
+                                    tamano="pequeno"
+                                    className="h-6 px-1.5"
+                                    onClick={() => poner_dato(campo, lineas.filter((_, j) => j !== i))}
+                                  >
+                                    ×
+                                  </Boton>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )
+                      }
+                      if (campo === "icono") {
+                        const valor = como_texto(ficha_cartela.datos?.[campo])
+                        return (
+                          <div key={campo} className="grid grid-cols-[90px_1fr] items-center gap-2">
+                            <Etiqueta className="text-xs">icono</Etiqueta>
+                            <Selector
+                              valor={valor || SIN_ICONO}
+                              alCambiar={(v) => poner_dato(campo, v === SIN_ICONO ? "" : v)}
+                            >
+                              <DisparadorSelector className="h-7 text-xs">
+                                <ValorSelector />
+                              </DisparadorSelector>
+                              <ContenidoSelector>
+                                <Opcion valor={SIN_ICONO}>(sin icono)</Opcion>
+                                {(ficha.iconos ?? []).map((ic) => (
+                                  <Opcion key={ic} valor={ic}>
+                                    {ic.replace(/_/g, " ")}
+                                  </Opcion>
+                                ))}
+                              </ContenidoSelector>
+                            </Selector>
+                          </div>
+                        )
+                      }
+                      return (
+                        <div key={campo} className="grid grid-cols-[90px_1fr] items-center gap-2">
+                          <Etiqueta className="text-xs">
+                            {campo}
+                            {info.obligatorio ? " *" : ""}
+                          </Etiqueta>
+                          <Entrada
+                            valor={como_texto(ficha_cartela.datos?.[campo])}
+                            maxLength={info.tope}
+                            alCambiar={(e) => poner_dato(campo, e.target.value)}
+                            className="text-xs"
+                          />
+                        </div>
+                      )
+                    })}
                   </div>
                   <div className="overflow-hidden rounded border bg-muted">
                     {guardadas[plano.id] ? (

@@ -75,8 +75,6 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
         # módulo — sin emparejar no hay subtítulo, no uno descuadrado)
         cursor, planos_con_marcas, cuadra = 0, [], True
         for plano in del_escena:
-            if plano.get("cartela"):
-                continue      # la cartela ES el texto de este plano
             texto = str(plano.get("narracion") or "")
             dichas = texto.split()
             ventana = palabras[cursor:cursor + len(dichas)]
@@ -86,12 +84,17 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
                     != [subtitulos.normalizar_texto(t) for t in dichas]):
                 cuadra = False
                 break
+            # las palabras del plano de cartela TAMBIÉN se consumen (el
+            # emparejado es con la escena entera); solo que su plano no
+            # lleva subtítulo — la cartela ES el texto de ese plano
+            cursor += len(dichas)
+            if plano.get("cartela"):
+                continue
             planos_con_marcas.append({
                 **plano,
                 "marcas": [[w.get("inicio"), w.get("fin")]
                            for w in ventana],
             })
-            cursor += len(dichas)
         if not cuadra or cursor != len(palabras):
             continue
         # EL TEXTO CORREGIDO A MANO MANDA, y se reparte SIN TOCAR LOS

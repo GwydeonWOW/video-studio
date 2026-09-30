@@ -366,10 +366,10 @@ export interface PropuestaRedactor extends RespuestaPlan<string> {
   redactados: number
 }
 
-/** Una cartela decidida: plantilla + sus campos. */
+/** Una cartela decidida: plantilla + sus campos (los de lista, en array). */
 export interface FichaCartela {
   plantilla: string
-  datos: Record<string, string>
+  datos: Record<string, string | string[]>
   por_que?: string
 }
 
@@ -381,18 +381,34 @@ export interface PropuestaCartelas {
   max_cartelas: number
 }
 
-/** Ficha de plantilla de cartela (campos y ejemplo). */
+/** Un hueco de la plantilla: si es obligatorio y cuántos caracteres caben. */
+export interface CampoCartela {
+  obligatorio: boolean
+  tope: number
+}
+
+/** Ficha de plantilla de cartela, con su muestra dibujada por el servidor. */
 export interface PlantillaCartela {
+  id: string
   nombre: string
   descripcion: string
-  campos: string[]
-  muestra: Record<string, string>
+  /** lo que lee el agente (y la persona) para decidir si es la suya */
+  cuando: string
+  campos: Record<string, CampoCartela>
+  /** (campo, mínimo, máximo) cuando un campo es una lista de líneas */
+  lista?: [string, number, number] | null
+  svg: string
 }
 
 /** Respuesta de GET /{pid}/cartelas. */
 export interface FichaCartelas {
   plan: Record<string, FichaCartela>
-  plantillas: Record<string, PlantillaCartela>
+  plantillas: PlantillaCartela[]
+  /** qué plantillas puede usar el agente al proponer (vacío = todas) */
+  plantillas_activas: string[]
+  /** el catálogo CERRADO de iconos que puede llevar una plantilla */
+  iconos: string[]
+  defecto: string
   planos: PlanoGrafismo[]
   max_cartelas: number
   obsoletos: string[]

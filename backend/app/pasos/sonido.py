@@ -110,7 +110,26 @@ PAPELES = {
                       "elegant swoosh intro"),
         "duracion": (0.3, 2.0), "ganancia": 0.6, "cuantos": 4,
     },
+    "tecla": {
+        "nombre": "Tecla de escribir",
+        "descripcion": "El tecleo de la cartela: un golpe por tecla, palabra a palabra.",
+        "consultas": ("typewriter single key press", "typewriter key click",
+                      "mechanical keyboard single click"),
+        "duracion": (0.05, 0.6), "ganancia": 0.32, "cuantos": 4,
+    },
+    "retorno": {
+        "nombre": "Retorno de carro",
+        "descripcion": "El ding del carro al terminar de escribir la cartela.",
+        "consultas": ("typewriter carriage return bell", "typewriter ding return"),
+        "duracion": (0.3, 3.0), "ganancia": 0.5, "cuantos": 3,
+    },
 }
+
+#: EL TECLEO de una cartela: a cuántas teclas por segundo tira como
+#: mucho, y cuántas por palabra — los topes que evitan una metralleta
+#: cuando una palabra entra con un hueco largo.
+TECLAS_POR_SEGUNDO = 16.0
+TECLAS_POR_PALABRA = 6
 
 #: DÓNDE CAE EL GOLPE del efecto dentro de la transición que se VE, en
 #: fracción de su duración. 0,5: el ojo lee el cambio en la mitad de la
@@ -913,6 +932,53 @@ def eventos(cortes, reparto, params, semilla=0, cartela_de=None) -> list[dict]:
                 fuera.append({"t": max(0.0, inicio + 0.15 - golpe),
                               "papel": "entrada_cartela", "ficha": ficha,
                               "ganancia": PAPELES["entrada_cartela"]["ganancia"]})
+
+        # 3. EL TECLEO de la cartela: una tecla por golpe mientras se
+        #    escribe, palabra a palabra, y el retorno del carro al
+        #    acabar. Los tiempos son los MISMO que dibuja el render
+        #    (los dejó p6 en `escritura`): con una cuenta paralela se
+        #    oiría escribir cuando no se escribe. Sin banco de teclas
+        #    no pasa nada — la cartela se escribe en silencio.
+        en_plano = cartela_de.get(sid)
+        if isinstance(en_plano, dict) and surtido.get("tecla"):
+            from . import cartelas as _cartelas      # noqa: PLC0415
+            cartela = en_plano.get("cartela") or {}
+            duracion = float(corte.get("duracion") or 0.0)
+            tiempos = [float(x) for x in (en_plano.get("tiempos") or [])
+                       if x is not None]
+            try:
+                palabras = _cartelas.tiempos_de_escritura(
+                    cartela, duracion, tiempos=tiempos)
+            except Exception:                                # noqa: BLE001
+                palabras = []
+            for orden, (cuando, palabra) in enumerate(palabras):
+                siguiente = (palabras[orden + 1][0]
+                             if orden + 1 < len(palabras) else cuando + 0.5)
+                hueco = max(0.04, min(siguiente - cuando, 0.5))
+                cuantas = max(1, min(TECLAS_POR_PALABRA,
+                                     len(str(palabra).strip()),
+                                     int(hueco * TECLAS_POR_SEGUNDO)))
+                for golpe in range(cuantas):
+                    ficha = elegir(surtido.get("tecla"), semilla, sid,
+                                   orden, golpe, vetados_de=prohibidos)
+                    if not ficha:
+                        break              # banco agotado: ni metralleta
+                    variacion = desempatar(semilla, sid, orden, golpe,
+                                           "vol") % 100
+                    fuera.append({
+                        "t": max(0.0, inicio + cuando
+                                 + hueco * golpe / float(cuantas)),
+                        "papel": "tecla", "ficha": ficha,
+                        "ganancia": PAPELES["tecla"]["ganancia"]
+                        * (0.78 + 0.22 * variacion / 99.0)})
+            if palabras and surtido.get("retorno"):
+                ficha = elegir(surtido.get("retorno"), semilla, sid,
+                               "retorno", vetados_de=prohibidos)
+                if ficha:
+                    fuera.append({
+                        "t": max(0.0, inicio + palabras[-1][0] + 0.32),
+                        "papel": "retorno", "ficha": ficha,
+                        "ganancia": PAPELES["retorno"]["ganancia"]})
     return sorted(fuera, key=lambda e: e["t"])
 
 

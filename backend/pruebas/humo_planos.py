@@ -8,7 +8,7 @@ nada):
 - el corte respeta la horquilla y las ventanas TILEAN el audio
   (t_out de un plano == t_in del siguiente, el último se lleva el cola)
 - los planos vecinos piden imágenes DISTINTAS (capa frase)
-- la cartela es UN plano de texto que no paga imagen
+- la cartela es UN plano de texto ESCRITO sobre su imagen (la paga)
 - la voz sin marcas de palabra (cata/vieja) es UN plano, como siempre
 - regrabar la voz (+80 ms) HEREDA el corte: no se re-corta ni se tiran
   las imágenes; si el texto cambió demasiado, corte de cero
@@ -149,8 +149,9 @@ segmentar.heredar = heredar_espiado
 segmentar.segmentar = segmentar_espiado
 
 PARAMS = {"calidad": "low", "estilo": "",
-          "unidades": {"S002": {"cartela": {"plantilla": "titulo",
-                                             "datos": {"titulo": "1947"}}}}}
+          "unidades": {"S002": {"cartela": {"plantilla": "cifra",
+                                             "datos": {"cifra": "1947",
+                                                       "label": "el transistor"}}}}}
 
 # ------------------------------------------------------- el primer corte
 
@@ -192,10 +193,11 @@ check("vecinos con imagen DISTINTA (la capa frase distingue)",
       len({p["prompt"] for p in de_s1}) == len(de_s1),
       str(len({p["prompt"] for p in de_s1})))
 
-check("S002 cartela: UN plano de texto que no paga imagen",
+check("S002 cartela: UN plano de texto ESCRITO sobre su imagen (la paga)",
       len(de_s2) == 1 and de_s2[0]["id"] == "S002"
-      and de_s2[0].get("imagen") is None
-      and (de_s2[0].get("cartela") or {}).get("plantilla") == "titulo",
+      and de_s2[0].get("imagen") is not None
+      and (de_s2[0].get("cartela") or {}).get("plantilla") == "cifra"
+      and isinstance(de_s2[0].get("escritura"), dict),
       str(de_s2)[:120])
 check("S003 sin marcas: la escena entera es UN plano (como siempre)",
       len(de_s3) == 1 and de_s3[0]["id"] == "S003"

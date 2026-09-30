@@ -42,41 +42,10 @@ SETS_DISENO = {
     },
 }
 
-#: Plantillas de cartela: un plano de TEXTO en vez de una imagen pagada.
-#: `campos` es lo que pide cada una; `muestra` son datos de ejemplo.
-PLANTILLAS_CARTELA = {
-    "titulo": {
-        "nombre": "Título",
-        "descripcion": "un titular grande y centrado",
-        "campos": ["titulo"],
-        "muestra": {"titulo": "El precio del pan"},
-    },
-    "cita": {
-        "nombre": "Cita",
-        "descripcion": "una frase entre comillas, con autor",
-        "campos": ["texto", "autor"],
-        "muestra": {"texto": "Quien no arriesga, no cruza.",
-                    "autor": "Refrán"},
-    },
-    "dato": {
-        "nombre": "Dato",
-        "descripcion": "una cifra enorme con su pie",
-        "campos": ["cifra", "pie"],
-        "muestra": {"cifra": "71 %", "pie": "de los hogares ya lo hace"},
-    },
-    "capitulo": {
-        "nombre": "Capítulo",
-        "descripcion": "número de capítulo y su título",
-        "campos": ["numero", "titulo"],
-        "muestra": {"numero": "2", "titulo": "La burbuja"},
-    },
-    "cierre": {
-        "nombre": "Cierre",
-        "descripcion": "el final del vídeo, con subtítulo",
-        "campos": ["titulo", "sub"],
-        "muestra": {"titulo": "Gracias por ver", "sub": "Sígueme para más"},
-    },
-}
+#: Las plantillas de CARTELA ya no viven aquí: son un motor propio
+#: (`pasos/cartelas.py`) con sus cuentas de anclaje con la voz. Lo que
+#: queda en grafismo es el rótulo — el texto que va ENCIMA de una
+#: imagen, que no necesita buscarle hueco a nada.
 
 #: Paleta por defecto: la de una pantalla oscura de vídeo explicativo.
 PALETA_DEFECTO = {"acento": "#eab308", "texto": "#f8fafc",
@@ -232,86 +201,4 @@ def svg_subtitulo(texto: str, diseno: str = "pastilla",
             f'fill="{paleta["texto"]}">{_escapar(linea)}</text>')
         y += salto
     partes.append("</svg>")
-    return "".join(partes)
-
-
-def svg_cartela(plantilla: str, datos: dict | None, paleta: dict | None = None,
-                duracion: float = 4.0) -> str:
-    """Una cartela completa (1920×1080): el plano que no se paga.
-
-    Cada plantilla es una composición distinta, pero todas comparten la
-    paleta del vídeo y el fondo propio: una cartela NO lleva imagen
-    debajo, porque el plano entero ES el texto.
-    """
-    paleta = paleta or dict(PALETA_DEFECTO)
-    datos = datos or {}
-    partes = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{ANCHO}" '
-              f'height="{ALTO}" viewBox="0 0 {ANCHO} {ALTO}">',
-              f'<rect width="{ANCHO}" height="{ALTO}" fill="{paleta["fondo"]}"/>']
-    familia = 'font-family="Arial, Helvetica, sans-serif"'
-    centro_y = ALTO / 2
-
-    if plantilla == "cita":
-        texto = _escapar(datos.get("texto", ""))
-        autor = _escapar(datos.get("autor", ""))
-        partes.append(
-            f'<text x="{ANCHO / 2}" y="{centro_y - 40}" text-anchor="middle" '
-            f'{familia} font-size="150" fill="{paleta["acento"]}">“</text>'
-            f'<text x="{ANCHO / 2}" y="{centro_y + 40}" text-anchor="middle" '
-            f'{familia} font-size="72" fill="{paleta["texto"]}">'
-            f"{texto}</text>")
-        if autor:
-            partes.append(
-                f'<text x="{ANCHO / 2}" y="{centro_y + 150}" '
-                f'text-anchor="middle" {familia} font-size="38" '
-                f'fill="{paleta["acento"]}">— {autor}</text>')
-    elif plantilla == "dato":
-        cifra = _escapar(datos.get("cifra", ""))
-        pie = _escapar(datos.get("pie", ""))
-        partes.append(
-            f'<text x="{ANCHO / 2}" y="{centro_y + 40}" text-anchor="middle" '
-            f'{familia} font-size="220" font-weight="800" '
-            f'fill="{paleta["acento"]}">{cifra}</text>')
-        if pie:
-            partes.append(
-                f'<text x="{ANCHO / 2}" y="{centro_y + 200}" '
-                f'text-anchor="middle" {familia} font-size="52" '
-                f'fill="{paleta["texto"]}">{pie}</text>')
-    elif plantilla == "capitulo":
-        numero = _escapar(datos.get("numero", ""))
-        titulo = _escapar(datos.get("titulo", ""))
-        partes.append(
-            f'<text x="{ANCHO / 2}" y="{centro_y - 60}" '
-            f'text-anchor="middle" {familia} font-size="44" letter-spacing="18" '
-            f'fill="{paleta["acento"]}">CAPÍTULO {numero}</text>'
-            f'<rect x="{ANCHO / 2 - 90}" y="{centro_y - 10}" width="180" '
-            f'height="4" fill="{paleta["acento"]}"/>'
-            f'<text x="{ANCHO / 2}" y="{centro_y + 130}" '
-            f'text-anchor="middle" {familia} font-size="96" font-weight="800" '
-            f'fill="{paleta["texto"]}">{titulo}</text>')
-    elif plantilla == "cierre":
-        titulo = _escapar(datos.get("titulo", ""))
-        sub = _escapar(datos.get("sub", ""))
-        partes.append(
-            f'<text x="{ANCHO / 2}" y="{centro_y}" text-anchor="middle" '
-            f'{familia} font-size="110" font-weight="800" '
-            f'fill="{paleta["texto"]}">{titulo}</text>')
-        if sub:
-            partes.append(
-                f'<text x="{ANCHO / 2}" y="{centro_y + 120}" '
-                f'text-anchor="middle" {familia} font-size="48" '
-                f'fill="{paleta["acento"]}">{sub}</text>')
-    else:  # titulo
-        titulo = _escapar(datos.get("titulo", ""))
-        partes.append(
-            f'<rect x="{ANCHO / 2 - 70}" y="{centro_y - 160}" width="140" '
-            f'height="6" fill="{paleta["acento"]}"/>'
-            f'<text x="{ANCHO / 2}" y="{centro_y}" text-anchor="middle" '
-            f'{familia} font-size="130" font-weight="800" '
-            f'fill="{paleta["texto"]}">{titulo}</text>')
-    # el instante de lectura, para la muestra de la pantalla
-    partes.append(
-        f'<text x="{ANCHO - 40}" y="{ALTO - 36}" text-anchor="end" '
-        f'{familia} font-size="28" fill="{paleta["acento"]}" opacity="0.65">'
-        f"~{round(float(duracion or 4))} s</text></svg>")
     return "".join(partes)

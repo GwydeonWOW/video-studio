@@ -32,16 +32,20 @@ El prompt de cada plano se ARMA con capas (regla de `pasos/direccion.py`):
     + direccion que se ve en ESTE plano (la capa que distingue vecinos)
     + frase    la narración del plano (su momento de la escena)
 
-Y hay planos que no se pagan: si una escena lleva CARTELA decidida
-(`params.unidades[escena].cartela`), no se genera imagen — el plano
-entero es texto, y lo dibuja el grafismo del render.
+Y LAS CARTELAS: si una escena lleva una decidida
+(`params.unidades[escena].cartela`), el tramo de planos en el que se
+dicen sus palabras se FUNDE en uno solo y la cartela se escribe encima
+de su imagen (`_marcar_cartelas`) — hoy van SIEMPRE sobre imagen, así
+que pagan como cualquier otro plano; el texto lo dibuja el render al
+ritmo de la voz (`pasos/cartelas.py`).
 """
 from __future__ import annotations
 
 from ..config import AJUSTES
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
-from . import comun, marcas_tts, p2_brief, catalogo_visual, encuadres, guia_estilo
+from . import (cartelas as cartelas_motor, catalogo_visual, comun,
+               encuadres, guia_estilo, marcas_tts, p2_brief)
 from ..motores import imagen_glm
 from ..motores.guion import segmentar
 
@@ -200,6 +204,113 @@ def _cortar(palabras: list, duracion: float, previos: list,
     return salida
 
 
+# ------------------------------------------------------------ las cartelas
+
+def _realternar_zoom(planos: list) -> None:
+    """Realterna el zoom de los planos que quedan tras una fusión.
+
+    El zoom alterna acercar/alejar plano a plano a propósito: dos
+    seguidos en la misma dirección se leen como un único movimiento
+    largo y el corte desaparece. Fundir una cartela BORRA planos, y sin
+    esto la alteración quedaba rota a partir del hueco.
+    """
+    anterior = None
+    for plano in planos:
+        zoom = plano.get("zoom")
+        if not isinstance(zoom, dict) or "de" not in zoom:
+            continue
+        if anterior is not None and zoom.get("tipo") == anterior:
+            zoom["tipo"] = "out" if zoom.get("tipo") == "in" else "in"
+            zoom["de"], zoom["a"] = zoom["a"], zoom["de"]
+        anterior = zoom.get("tipo")
+
+
+def _marcar_cartelas(planos: list, unidades: dict, trabajo,
+                     limitar: bool = True) -> tuple[list, list]:
+    """Decide qué planos son cartela y FUNDE el tramo que ocupa cada una.
+
+    Puerto del `_marcar_cartelas`/`_fundir_cartelas` del original,
+    adaptado a la unidad de aquí: la cartela se pide por ESCENA del
+    guion (`unidades[sid].cartela`) pero el tramo se decide sobre los
+    PLANOS ya cortados — el candidato viaja en el PRIMER plano de su
+    escena y `tramo_de` lo muda al plano donde de verdad se dicen sus
+    palabras. Una cartela nunca cruza a otra escena (`bloque_de`).
+
+    -> ([{id, escena, plantilla, planos, segundos, absorbidos}], avisos)
+    """
+    plan = {}
+    vistos = set()
+    for plano in planos:
+        sid = str(plano.get("escena") or "")
+        if not sid or sid in vistos:
+            continue                      # solo el PRIMER plano de su escena
+        vistos.add(sid)
+        cartela = es_cartela(unidades, sid)
+        if cartela:
+            plan[str(plano["id"])] = cartela
+    if not plan:
+        return [], []
+    trabajo.avance(f"repartiendo {len(plan)} cartela(s) sobre el corte")
+
+    if limitar:
+        # la ocupación se cuenta ANTES de repartir: una cartela que
+        # quiere tres planos ya no se los puede comer a la que viene
+        # detrás
+        ocupacion = cartelas_motor.ocupacion_de(planos, plan)
+        puestas, avisos = cartelas_motor.repartir(planos, plan,
+                                                  ocupacion=ocupacion)
+    else:
+        # regenerar una escena sola NO vuelve a repartir: el reparto se
+        # decidió sobre el guion entero y redecidirlo con una sola
+        # escena delante lo cambiaría
+        puestas, avisos = dict(plan), []
+
+    def libre(otro) -> bool:
+        otro = otro if isinstance(otro, dict) else {}
+        return not (puestas.get(otro.get("id")) or otro.get("cartela"))
+
+    fichas = []
+    for pid, ficha in puestas.items():
+        indice = next((i for i, p in enumerate(planos)
+                       if str(p.get("id")) == pid), None)
+        if indice is None:
+            continue
+        desde, hasta, escritura = cartelas_motor.tramo_de(
+            ficha, planos, indice, libre)
+        hogar = planos[desde]
+        # LA MUDANZA: `tramo_de` devuelve el plano donde de verdad se
+        # dicen sus palabras — la cartela se muda a él si no era el suyo
+        hogar["cartela"] = ficha
+        hogar["escritura"] = escritura
+        absorbidos = []
+        for chico in planos[desde + 1:hasta + 1]:
+            hogar["narracion"] = " ".join(
+                x for x in (hogar.get("narracion"),
+                            chico.get("narracion")) if x)
+            hogar["marcas"] = (hogar.get("marcas") or []) + \
+                (chico.get("marcas") or [])
+            hogar["corte"] = chico.get("corte") or hogar.get("corte")
+            hogar["transicion"] = (chico.get("transicion")
+                                   or hogar.get("transicion"))
+            hogar["t_out"] = chico["t_out"]
+            absorbidos.append(str(chico.get("id")))
+        hogar["duracion"] = round(float(hogar["t_out"])
+                                  - float(hogar["t_in"]), 3)
+        del planos[desde + 1:hasta + 1]
+        fichas.append({"id": str(hogar.get("id")),
+                       "escena": str(hogar.get("escena")),
+                       "plantilla": ficha.get("plantilla"),
+                       "planos": hasta - desde + 1,
+                       "segundos": hogar["duracion"],
+                       "absorbidos": absorbidos})
+        trabajo.avance(
+            f"cartela {hogar['id']} ({ficha.get('plantilla')}): "
+            + (f"funde {hasta - desde + 1} planos" if hasta > desde
+               else "un plano"))
+    _realternar_zoom(planos)
+    return fichas, list(avisos)
+
+
 def ejecutar(proyecto: Proyecto, params: dict, trabajo,
              solo_escenas: list | None = None) -> dict:
     guion = p2_brief.proyecto_leer_datos(proyecto, "guion")
@@ -243,30 +354,27 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     for escena in escenas:
         trabajo.comprobar_cancelacion()
         sid = escena["id"]
-        cartela = es_cartela(unidades, sid)
         ficha_voz = voz_de.get(sid) or {}
         duracion = float(ficha_voz.get("duracion") or 0.0)
         palabras = [p for p in (ficha_voz.get("palabras") or [])
                     if isinstance(p, dict)]
         zoom = segmentar.alternar_zoom(indice)
         ranura = segmentar.transicion_para(indice, "fuerte")
-        if cartela or not palabras or duracion <= 0:
-            # cartela, o voz SIN marcas (cata/vieja): la escena entera
-            # es UN plano — el comportamiento de siempre
+        if not palabras or duracion <= 0:
+            # voz SIN marcas (cata/vieja): la escena entera es UN plano
+            # — el comportamiento de siempre
             planos.append({"id": sid, "escena": sid,
                            "t_in": 0.0, "t_out": round(duracion, 3),
                            "duracion": round(duracion, 3), "corte": "fuerte",
                            "zoom": zoom, "transicion": ranura,
-                           **({"cartela": cartela, "imagen": None,
-                               "prompt": "(cartela)"} if cartela else {}),
                            "narracion": marcas_tts.limpiar(
                                escena.get("narracion", ""))})
             indice += 1
             continue
         trozos = _cortar(palabras, duracion, previos_de.get(sid) or [],
                          minimo, maximo, reparto)
-        for k, (t_in, t_out, corte, texto, _palabras) in enumerate(trozos,
-                                                                   start=1):
+        for k, (t_in, t_out, corte, texto, trozo) in enumerate(trozos,
+                                                               start=1):
             pid = f"{sid}-{k}" if len(trozos) > 1 else sid
             planos.append({"id": pid, "escena": sid, "t_in": t_in,
                            "t_out": t_out,
@@ -275,22 +383,38 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
                            "zoom": segmentar.alternar_zoom(indice),
                            "transicion": segmentar.transicion_para(
                                indice, corte),
+                           # LAS MARCAS DE PALABRA del trozo, en el reloj
+                           # de la escena: con ellas las cartelas anclan
+                           # cada palabra que escriben al instante en
+                           # que la voz la dice
+                           "marcas": [[p["inicio"], p["fin"]] for p in trozo],
                            "narracion": texto})
             cortados.append(planos[-1])
             indice += 1
 
-    # FASE 2 — las imágenes, una a una (cuestan dinero)
-    a_pagar = [p for p in planos if not p.get("cartela")]
-    cartelas = [p for p in planos if p.get("cartela")]
+    # FASE 1b — las cartelas: decididas ANTES de pagar, sobre el corte
+    # ya hecho. El tramo que ocupa cada una se FUNDE en un solo plano:
+    # no hay ningún corte dentro de la cartela.
+    detalle_cartelas, avisos_cartelas = _marcar_cartelas(
+        planos, unidades, trabajo, limitar=solo_escenas is None)
+
+    # FASE 2 — las imágenes, una a una (cuestan dinero). Las cartelas de
+    # hoy van SIEMPRE sobre la imagen del plano (`TODAS_SOBRE_IMAGEN`),
+    # así que pagan como cualquier otro; solo el fondo negro (en desuso)
+    # se libera.
+    a_pagar = [p for p in planos if not cartelas_motor.sin_imagen(p)]
+    con_cartela = [p for p in planos if p.get("cartela")]
     if a_pagar and not imagen_glm.clave(claves):
         raise imagen_glm.ErrorImagen(
             "falta la clave de GLM para imagenes (Configuracion -> claves)")
     pagadas = 0
     for plano in planos:
         trabajo.comprobar_cancelacion()
-        if plano.get("cartela"):
+        if cartelas_motor.sin_imagen(plano):
             trabajo.avance(f"cartela {plano['id']} "
                            "(plano de texto: no se paga imagen)")
+            plano["imagen"] = None
+            plano["prompt"] = "(cartela)"
             continue
         sid = plano["escena"]
         escena = next(e for e in escenas if e["id"] == sid)
@@ -311,13 +435,18 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
 
     informe = (segmentar.informe(cortados, minimo, maximo, reparto=reparto)
                if cortados else None)
+    if detalle_cartelas or avisos_cartelas:
+        informe = dict(informe or {})
+        informe["cartelas"] = {"fichas": detalle_cartelas,
+                               "avisos": avisos_cartelas}
     total = len(planos)
-    trabajo.avance(f"{total} planos: {len(a_pagar)} imagen(es) + "
-                   f"{len(cartelas)} cartela(s) de texto"
+    trabajo.avance(f"{total} planos: {len(a_pagar)} imagen(es)"
+                   + (f" · {len(con_cartela)} con cartela encima"
+                      if con_cartela else "")
                    + (f" · media {informe['duracion_media']} s por plano"
-                      if informe else ""))
+                      if informe and "duracion_media" in informe else ""))
     return {"planos": planos, "calidad": calidad,
-            "cartelas": len(cartelas),
+            "cartelas": len(con_cartela),
             **({"informe": informe} if informe else {}),
             "ritmo": {"minimo": minimo, "maximo": maximo}}
 
