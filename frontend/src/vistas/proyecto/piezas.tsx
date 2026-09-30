@@ -46,6 +46,44 @@ export function Vacio({
   )
 }
 
+/** La lupa: una imagen a pantalla completa con su ficha al pie. Un clic
+ * (o Escape) la cierra; la imagen dentro no cuenta como clic de cierre. */
+export function Lupa({
+  url,
+  detalle,
+  alCerrar,
+}: {
+  url: string
+  detalle?: string
+  alCerrar: () => void
+}) {
+  useEffect(() => {
+    const al_tecla = (e: KeyboardEvent) => {
+      if (e.key === "Escape") alCerrar()
+    }
+    window.addEventListener("keydown", al_tecla)
+    return () => window.removeEventListener("keydown", al_tecla)
+  }, [alCerrar])
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black/90 p-6"
+      onClick={alCerrar}
+    >
+      <img
+        src={url}
+        alt={detalle ?? ""}
+        className="max-h-[78vh] max-w-full cursor-zoom-out object-contain"
+        onClick={(e) => e.stopPropagation()}
+      />
+      {detalle && (
+        <p className="max-w-3xl text-center text-xs leading-relaxed text-white/70">
+          {detalle}
+        </p>
+      )}
+    </div>
+  )
+}
+
 /* ----------------------------------------------------------- estimación */
 
 interface EstimacionPaso {

@@ -1,5 +1,5 @@
 /** Paneles de contenido para cada paso del pipeline. */
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { AudioLines, BadgeCheck, Check, Film, Loader2, Palette, PenLine, Play, RefreshCw } from "lucide-react"
 import { api } from "../../lib/api"
@@ -14,11 +14,13 @@ import type {
   DatosRender,
   DatosRevision,
   DatosVoz,
+  Escena,
   FichaPaso,
   PrevisualizacionVoz,
   PresetVoz,
   PropuestaVoz,
   TrabajoFicha,
+  VozCatalogo,
 } from "../../lib/tipos"
 import { Boton } from "../../components/ui/button"
 import { AreaTexto } from "../../components/ui/textarea"
@@ -43,7 +45,7 @@ import {
   Opcion,
   ValorSelector,
 } from "../../components/ui/selector"
-import { Vacio } from "./piezas"
+import { Lupa, Vacio } from "./piezas"
 import { ZonaPresetPaso } from "./preset_paso"
 import { DialogoGrafismo, type PestanaGrafismo } from "./grafismo"
 import {
@@ -189,6 +191,54 @@ export function PanelGuion({
   const [bloques_abierto, setBloquesAbierto] = useState(false)
   const [orden_bloques, setOrdenBloques] = useState("")
   const [enviando_bloques, setEnviandoBloques] = useState(false)
+  // edición a mano: UNA escena abierta a la vez; el texto vive en el
+  // cajón `params.unidades[sid].texto` (lo escrito a mano manda) y se
+  // autoguarda tras una pausa de teclear, como el original
+  const [editando, setEditando] = useState<string | null>(null)
+  const [texto_manual, setTextoManual] = useState<Record<string, string>>({})
+  const temporizadores = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const pendientes = useRef<Record<string, { escena: Escena; texto: string }>>({})
+
+  // el cajón de lo editado a mano: `params.unidades[sid].texto`, el
+  // mismo que aplica el paso al regenerar (LO ESCRITO A MANO MANDA) y
+  // el que regrabar aplica antes de pagar la voz. Se mantiene un
+  // espejo local para que dos escenas seguidas no se pisen (el PUT de
+  // params guarda el objeto ENTERO). Los hooks van ANTES del return
+  // corto: el guion puede llegar con este panel ya montado y React no
+  // tolera que cambie el orden de hooks entre render y render
+  const params = (ficha.params ?? {}) as Record<string, unknown>
+  const unidades = useRef<Record<string, { texto?: string }> | null>(null)
+  if (ficha.estado !== "vacio" && unidades.current === null)
+    unidades.current = {
+      ...((params.unidades as Record<string, { texto?: string }>) ?? {}),
+    }
+  const guardar_manual = (escena: Escena, texto: string) => {
+    const limpio = texto.replace(/\s+/g, " ").trim()
+    const base = sinAnotaciones(escena.narracion).replace(/\s+/g, " ").trim()
+    if (unidades.current) {
+      if (limpio === base) delete unidades.current[escena.id]
+      else unidades.current[escena.id] = { texto: limpio }
+    }
+    api
+      .put(`/api/proyectos/${pid}/pasos/guion/params`, {
+        ...params,
+        unidades: { ...unidades.current },
+      })
+      .catch((e) => toast.error(String((e as Error).message ?? e)))
+  }
+  const guardar_ref = useRef(guardar_manual)
+  guardar_ref.current = guardar_manual
+
+  // al desmontar, lo tecleado en el último medio segundo no se pierde
+  useEffect(
+    () => () => {
+      for (const t of Object.values(temporizadores.current)) clearTimeout(t)
+      for (const p of Object.values(pendientes.current))
+        guardar_ref.current(p.escena, p.texto)
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  )
 
   if (ficha.estado === "vacio")
     return (
@@ -199,6 +249,45 @@ export function PanelGuion({
     )
   const datos = ficha.datos as DatosGuion
   const escenas = datos.escenas ?? []
+  const texto_de = (escena: Escena) => {
+    const manual = unidades.current?.[escena.id]?.texto
+    return manual?.trim() ? manual : sinAnotaciones(escena.narracion)
+  }
+  const tocado = (id: string) => {
+    const manual = unidades.current?.[id]?.texto
+    return !!manual?.trim() && manual !== sinAnotaciones(
+      escenas.find((e) => e.id === id)?.narracion ?? "")
+  }
+
+  const al_editar = (escena: Escena, texto: string) => {
+    setTextoManual((prev) => ({ ...prev, [escena.id]: texto }))
+    clearTimeout(temporizadores.current[escena.id])
+    pendientes.current[escena.id] = { escena, texto }
+    temporizadores.current[escena.id] = setTimeout(() => {
+      delete pendientes.current[escena.id]
+      guardar_manual(escena, texto)
+    }, 700)
+  }
+  const cerrar_edicion = (escena: Escena) => {
+    clearTimeout(temporizadores.current[escena.id])
+    if (pendientes.current[escena.id]) {
+      const p = pendientes.current[escena.id]
+      delete pendientes.current[escena.id]
+      guardar_manual(p.escena, p.texto)
+    }
+    setEditando(null)
+    recargar()
+  }
+  const regrabar_escrito = async (id: string) => {
+    try {
+      const trabajo = await api.post<{ id: string }>(
+        `/api/proyectos/${pid}/voz/escenas/${id}/regrabar`,
+      )
+      seguirTrabajo(trabajo.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
 
   const cambiar_seleccion = (id: string) => {
     setSeleccion((previa) => {
@@ -302,16 +391,69 @@ export function PanelGuion({
                   <p className="font-medium">{escena.titulo}</p>
                 </div>
               </div>
-              <BotonReescribir
-                pid={pid}
-                escena={escena.id}
-                ocupado={ocupado}
-                seguirTrabajo={seguirTrabajo}
-              />
+              <div className="flex shrink-0 items-center gap-1">
+                {tocado(escena.id) && (
+                  <Insignia variante="aviso">editado</Insignia>
+                )}
+                {editando === escena.id ? (
+                  <Boton
+                    variante="fantasma"
+                    tamano="pequeno"
+                    onClick={() => cerrar_edicion(escena)}
+                  >
+                    <Check /> Hecho
+                  </Boton>
+                ) : (
+                  <Boton
+                    variante="fantasma"
+                    tamano="pequeno"
+                    onClick={() => {
+                      setTextoManual((prev) => ({
+                        ...prev,
+                        [escena.id]: texto_de(escena),
+                      }))
+                      setEditando(escena.id)
+                    }}
+                  >
+                    <PenLine /> Editar a mano
+                  </Boton>
+                )}
+                {tocado(escena.id) && editando !== escena.id && (
+                  <Boton
+                    variante="fantasma"
+                    tamano="pequeno"
+                    deshabilitado={ocupado}
+                    title="Aplica lo escrito al guion y regraba SU audio (ElevenLabs cobra la toma)"
+                    onClick={() => regrabar_escrito(escena.id)}
+                  >
+                    <AudioLines /> Regrabar lo escrito
+                  </Boton>
+                )}
+                <BotonReescribir
+                  pid={pid}
+                  escena={escena.id}
+                  ocupado={ocupado}
+                  seguirTrabajo={seguirTrabajo}
+                />
+              </div>
             </div>
-            <p className="whitespace-pre-wrap text-sm">
-              {sinAnotaciones(escena.narracion)}
-            </p>
+            {editando === escena.id ? (
+              <div className="space-y-1">
+                <AreaTexto
+                  filas={5}
+                  valor={texto_manual[escena.id] ?? texto_de(escena)}
+                  alCambiar={(e) => al_editar(escena, e.target.value)}
+                  autoFocus
+                />
+                <p className="text-xs text-muted-foreground">
+                  Se guarda solo. Lo escrito a mano manda: el guion
+                  conservará este texto al regenerar y «Regrabar lo escrito»
+                  locuta esto (las pausas anotadas de la escena se pierden).
+                </p>
+              </div>
+            ) : (
+              <p className="whitespace-pre-wrap text-sm">{texto_de(escena)}</p>
+            )}
             {escena.visual && (
               <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
                 <span className="font-medium text-foreground">Visual:</span>{" "}
@@ -533,6 +675,12 @@ export function PanelVoz({
         params={ficha.params ?? {}}
         recargar={recargar}
       />
+      <ZonaCatalogoVoces
+        pid={pid}
+        ocupado={ocupado}
+        params={ficha.params ?? {}}
+        recargar={recargar}
+      />
       <ZonaTonosCatalogo
         pid={pid}
         ocupado={ocupado}
@@ -563,6 +711,7 @@ export function PanelVoz({
             variante="contorno"
             tamano="pequeno"
             deshabilitado={ocupado}
+            title="Vuelve a grabar esta escena tal como está escrita (ElevenLabs cobra la toma)"
             onClick={async () => {
               try {
                 const trabajo = await api.post<{ id: string }>(
@@ -576,6 +725,12 @@ export function PanelVoz({
           >
             <RefreshCw /> Regrabar
           </Boton>
+          <BotonCorregirEscena
+            pid={pid}
+            escena={escena.id}
+            ocupado={ocupado}
+            seguirTrabajo={seguirTrabajo}
+          />
         </div>
       ))}
     </div>
@@ -583,6 +738,273 @@ export function PanelVoz({
 }
 
 /** Elegir voz describiéndola + cata antes de pagar la grabación entera. */
+/** «Corregir y regrabar»: la nota de la escena viaja al guionista y el
+ * audio se regraba en el MISMO trabajo (comentario → texto nuevo → voz
+ * nueva; sin ventana para regrabar texto viejo). */
+function BotonCorregirEscena({
+  pid,
+  escena,
+  ocupado,
+  seguirTrabajo,
+}: {
+  pid: string
+  escena: string
+  ocupado: boolean
+  seguirTrabajo: (tid: string) => void
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const [nota, setNota] = useState("")
+  const [enviando, setEnviando] = useState(false)
+
+  const corregir = async () => {
+    if (!nota.trim()) return
+    setEnviando(true)
+    try {
+      const trabajo = await api.post<{ id: string }>(
+        `/api/proyectos/${pid}/voz/escenas/${escena}/regrabar`,
+        { peticion: nota }
+      )
+      setAbierto(false)
+      setNota("")
+      seguirTrabajo(trabajo.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setEnviando(false)
+    }
+  }
+
+  return (
+    <>
+      <Boton
+        variante="contorno"
+        tamano="pequeno"
+        deshabilitado={ocupado}
+        title="Reescribe la narración con esta nota y regraba SU audio en un trabajo"
+        onClick={() => setAbierto(true)}
+      >
+        <PenLine /> Corregir y regrabar
+      </Boton>
+      <Dialogo abierto={abierto} alCambiar={setAbierto}>
+        <ContenidoDialogo>
+          <CabeceraDialogo>
+            <TituloDialogo>Corregir y regrabar {escena}</TituloDialogo>
+            <DescripcionDialogo>
+              La nota viaja al guionista (reescribe SOLO esta escena) y el
+              audio se regraba a continuación en el mismo trabajo. Paga una
+              reescritura y una toma de ElevenLabs.
+            </DescripcionDialogo>
+          </CabeceraDialogo>
+          <AreaTexto
+            filas={4}
+            valor={nota}
+            alCambiar={(e) => setNota(e.target.value)}
+            placeholder="sin tan solemne, que suene conversado…"
+            autoFocus
+          />
+          <div className="flex justify-end gap-2">
+            <Boton variante="contorno" onClick={() => setAbierto(false)}>
+              Cancelar
+            </Boton>
+            <Boton onClick={corregir} deshabilitado={enviando || !nota.trim()}>
+              {enviando && <Loader2 className="animate-spin" />}
+              Reescribir y regrabar
+            </Boton>
+          </div>
+        </ContenidoDialogo>
+      </Dialogo>
+    </>
+  )
+}
+
+/** El catálogo de voces de la cuenta: rejilla con escucha SIN elegir
+ * (una cata de ~12 s con las primeras frases del guion, como el
+ * original) y «Usar» que escribe el voice_id en los params. */
+function ZonaCatalogoVoces({
+  pid,
+  ocupado,
+  params,
+  recargar,
+}: {
+  pid: string
+  ocupado: boolean
+  params: Record<string, unknown>
+  recargar: () => void
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const [voces, setVoces] = useState<VozCatalogo[] | null>(null)
+  const [busca, setBusca] = useState("")
+  const [catas, setCatas] = useState<Record<string, PrevisualizacionVoz>>({})
+  const [escuchando, setEscuchando] = useState<string | null>(null)
+  const escuchando_ref = useRef<string | null>(null)
+  const [tid, setTid] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!abierto || voces) return
+    api
+      .get<VozCatalogo[]>("/api/voces")
+      .then(setVoces)
+      .catch((e) => {
+        toast.error(String((e as Error).message ?? e))
+        setVoces([])
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [abierto])
+
+  const al_terminar = (final: TrabajoFicha) => {
+    const objetivo = escuchando_ref.current
+    if (final.estado === "hecho" && objetivo) {
+      const r = final.resultado
+      if (r && typeof r === "object" && "url" in r)
+        setCatas((prev) => ({ ...prev, [objetivo]: r as PrevisualizacionVoz }))
+    } else if (final.estado === "fallo") {
+      toast.error(final.error || "la cata falló")
+    }
+    setEscuchando(null)
+    escuchando_ref.current = null
+  }
+  const { ficha: trabajo } = usarTrabajo({ tid, alTerminar: al_terminar })
+  const sintetizando =
+    !!tid && (trabajo?.estado === "en_cola" || trabajo?.estado === "ejecutando")
+
+  const escuchar = async (voz: VozCatalogo) => {
+    if (catas[voz.voice_id]) return
+    setEscuchando(voz.voice_id)
+    escuchando_ref.current = voz.voice_id
+    try {
+      const t = await api.post<{ id: string }>(
+        `/api/proyectos/${pid}/voz/previsualizar`,
+        { params: { ...params, voz: voz.voice_id }, segundos: 12 }
+      )
+      setTid(t.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+      setEscuchando(null)
+      escuchando_ref.current = null
+    }
+  }
+
+  const usar = async (voz: VozCatalogo) => {
+    try {
+      await api.put(`/api/proyectos/${pid}/pasos/voz/params`, {
+        ...params,
+        voz: voz.voice_id,
+      })
+      toast.success(
+        `voz ${voz.nombre}: guardada (el paso queda obsoleto y hay que regenerar)`
+      )
+      recargar()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  const filtradas = (voces ?? []).filter((v) => {
+    const q = busca.trim().toLowerCase()
+    if (!q) return true
+    const etiquetas = Object.values(v.etiquetas ?? {})
+      .map(String)
+      .join(" ")
+    return `${v.nombre} ${v.voice_id} ${etiquetas} ${(v.idiomas ?? []).join(" ")}`
+      .toLowerCase()
+      .includes(q)
+  })
+
+  return (
+    <div className="rounded-md border bg-card px-3 py-2">
+      <button
+        className="flex w-full items-center gap-2 text-left text-sm font-medium"
+        onClick={() => setAbierto((v) => !v)}
+      >
+        <AudioLines className="h-4 w-4" />
+        Voces de la cuenta
+        <span className="ml-auto text-xs font-normal text-muted-foreground">
+          {abierto ? "ocultar" : "escuchar sin elegir"}
+        </span>
+      </button>
+      {abierto && (
+        <div className="mt-3 space-y-3">
+          {voces === null ? (
+            <div className="flex justify-center py-4">
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
+            <>
+              <Entrada
+                valor={busca}
+                alCambiar={(e) => setBusca(e.target.value)}
+                placeholder="buscar por nombre, acento, idioma…"
+              />
+              {filtradas.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  Sin voces que casen (¿hay clave de ElevenLabs en
+                  Configuración?).
+                </p>
+              )}
+              <div className="grid gap-2 sm:grid-cols-2">
+                {filtradas.map((voz) => {
+                  const cata = catas[voz.voice_id]
+                  return (
+                    <div
+                      key={voz.voice_id}
+                      className="rounded-md border p-3 text-sm"
+                    >
+                      <p className="font-medium">{voz.nombre}</p>
+                      <p className="truncate font-mono text-xs text-muted-foreground">
+                        {voz.voice_id}
+                      </p>
+                      {Object.keys(voz.etiquetas ?? {}).length > 0 && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {Object.entries(voz.etiquetas)
+                            .filter(([, v]) => v)
+                            .map(([k, v]) => `${k}: ${String(v)}`)
+                            .join(" · ")}
+                        </p>
+                      )}
+                      {cata && (
+                        <audio
+                          controls
+                          preload="none"
+                          src={cata.url}
+                          className="mt-2 h-8 w-full"
+                        />
+                      )}
+                      <div className="mt-2 flex gap-2">
+                        <Boton
+                          variante="contorno"
+                          tamano="pequeno"
+                          deshabilitado={ocupado || sintetizando}
+                          title="Sintetiza ~12 s con esta voz sobre el guion (cuesta esos caracteres)"
+                          onClick={() => escuchar(voz)}
+                        >
+                          {escuchando === voz.voice_id && sintetizando ? (
+                            <Loader2 className="animate-spin" />
+                          ) : (
+                            <Play />
+                          )}
+                          {cata ? "Otra vez" : "Escuchar"}
+                        </Boton>
+                        <Boton
+                          variante="fantasma"
+                          tamano="pequeno"
+                          deshabilitado={ocupado}
+                          onClick={() => usar(voz)}
+                        >
+                          Usar
+                        </Boton>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ZonaElegirVoz({
   pid,
   ocupado,
@@ -904,7 +1326,12 @@ function ZonaTonosCatalogo({
 
 /* ----------------------------------------------------- 5 revisión de voz */
 
-export function PanelRevision({ ficha }: PropsPanel) {
+export function PanelRevision({
+  pid,
+  ficha,
+  ocupado,
+  seguirTrabajo,
+}: PropsPanel) {
   if (ficha.estado === "vacio")
     return (
       <Vacio
@@ -928,9 +1355,17 @@ export function PanelRevision({ ficha }: PropsPanel) {
           <div className="space-y-2">
             {(datos.avisos ?? []).map((aviso) => (
               <div key={aviso.id} className="rounded-md border p-3 text-sm">
-                <p className="font-mono text-xs text-muted-foreground">
-                  {aviso.id}
-                </p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {aviso.id}
+                  </p>
+                  <BotonNotaEscena
+                    pid={pid}
+                    escena={aviso.id}
+                    ocupado={ocupado}
+                    seguirTrabajo={seguirTrabajo}
+                  />
+                </div>
                 <ul className="mt-1 list-inside list-disc text-sm">
                   {aviso.problemas.map((p, i) => (
                     <li key={i}>{p}</li>
@@ -942,6 +1377,85 @@ export function PanelRevision({ ficha }: PropsPanel) {
         </>
       )}
     </div>
+  )
+}
+
+/** La nota de la revisión: se escribe tras ESCUCHAR la escena y viaja
+ * como comentario (comentarios → texto nuevo → voz nueva, en un
+ * trabajo). Es el oído quien manda, no el umbral. */
+function BotonNotaEscena({
+  pid,
+  escena,
+  ocupado,
+  seguirTrabajo,
+}: {
+  pid: string
+  escena: string
+  ocupado: boolean
+  seguirTrabajo: (tid: string) => void
+}) {
+  const [abierto, setAbierto] = useState(false)
+  const [nota, setNota] = useState("")
+  const [enviando, setEnviando] = useState(false)
+
+  const enviar = async () => {
+    if (!nota.trim()) return
+    setEnviando(true)
+    try {
+      const trabajo = await api.post<{ id: string }>(
+        `/api/proyectos/${pid}/revision_audio/escenas/${escena}/comentarios`,
+        { comentarios: [{ escena_id: escena, comentario: nota }] }
+      )
+      setAbierto(false)
+      setNota("")
+      seguirTrabajo(trabajo.id)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setEnviando(false)
+    }
+  }
+
+  return (
+    <>
+      <Boton
+        variante="fantasma"
+        tamano="pequeno"
+        deshabilitado={ocupado}
+        title="Reescribe la narración con esta nota y regraba SU audio en un trabajo"
+        onClick={() => setAbierto(true)}
+      >
+        <PenLine /> Nota para esta escena
+      </Boton>
+      <Dialogo abierto={abierto} alCambiar={setAbierto}>
+        <ContenidoDialogo>
+          <CabeceraDialogo>
+            <TituloDialogo>Nota para {escena}</TituloDialogo>
+            <DescripcionDialogo>
+              Lo que escribas viaja al guionista: reescribe SOLO esta escena
+              con la nota y regraba su audio en el mismo trabajo. Paga una
+              reescritura y una toma de ElevenLabs.
+            </DescripcionDialogo>
+          </CabeceraDialogo>
+          <AreaTexto
+            filas={4}
+            valor={nota}
+            alCambiar={(e) => setNota(e.target.value)}
+            placeholder="el final se lo come, que respire antes del dato…"
+            autoFocus
+          />
+          <div className="flex justify-end gap-2">
+            <Boton variante="contorno" onClick={() => setAbierto(false)}>
+              Cancelar
+            </Boton>
+            <Boton onClick={enviar} deshabilitado={enviando || !nota.trim()}>
+              {enviando && <Loader2 className="animate-spin" />}
+              Reescribir y regrabar
+            </Boton>
+          </div>
+        </ContenidoDialogo>
+      </Dialogo>
+    </>
   )
 }
 
@@ -960,6 +1474,9 @@ export function PanelAssets({
   const [estilo_abierto, setEstiloAbierto] = useState(false)
   const [pestana_estilo, setPestanaEstilo] = useState<PestanaEstiloVisual>("catalogo")
   const [conservar_abierto, setConservarAbierto] = useState(false)
+  const [lupa, setLupa] = useState<{ url: string; detalle: string } | null>(
+    null,
+  )
   if (ficha.estado === "vacio")
     return (
       <div className="space-y-4">
@@ -1053,6 +1570,7 @@ export function PanelAssets({
         {(datos.planos ?? []).map((plano) => {
           const obsoleto = obsoletas.includes(plano.escena)
           const pid_plano = plano.id ?? plano.escena
+          const cartela = plano.cartela
           return (
             <div
               key={pid_plano}
@@ -1060,12 +1578,18 @@ export function PanelAssets({
                 obsoleto ? "ring-2 ring-amber-500" : ""
               }`}
             >
-              {plano.cartela ? (
+              {cartela ? (
                 <img
                   src={`/api/proyectos/${pid}/cartelas/vista?plano=${pid_plano}`}
                   alt={`cartela ${pid_plano}`}
-                  title={`cartela ${plano.cartela.plantilla}`}
-                  className="aspect-video w-full bg-muted object-cover"
+                  title={`cartela ${cartela.plantilla}`}
+                  className="aspect-video w-full cursor-zoom-in bg-muted object-cover"
+                  onClick={() =>
+                    setLupa({
+                      url: `/api/proyectos/${pid}/cartelas/vista?plano=${pid_plano}`,
+                      detalle: `${pid_plano} · cartela ${cartela.plantilla}${plano.narracion ? ` · «${plano.narracion}»` : ""}`,
+                    })
+                  }
                   onError={(e) =>
                     (e.currentTarget.style.visibility = "hidden")
                   }
@@ -1075,7 +1599,13 @@ export function PanelAssets({
                   src={`/a/${pid}/${plano.imagen}`}
                   alt={pid_plano}
                   title={plano.prompt}
-                  className="aspect-video w-full bg-muted object-cover"
+                  className="aspect-video w-full cursor-zoom-in bg-muted object-cover"
+                  onClick={() =>
+                    setLupa({
+                      url: `/a/${pid}/${plano.imagen}`,
+                      detalle: `${pid_plano}${plano.narracion ? ` · «${plano.narracion}»` : ""}${plano.prompt ? `\n${plano.prompt}` : ""}`,
+                    })
+                  }
                   onError={(e) =>
                     (e.currentTarget.style.visibility = "hidden")
                   }
@@ -1167,6 +1697,9 @@ export function PanelAssets({
         alCambiar={setConservarAbierto}
         recargar={recargar}
       />
+      {lupa && (
+        <Lupa url={lupa.url} detalle={lupa.detalle} alCerrar={() => setLupa(null)} />
+      )}
     </div>
   )
 }

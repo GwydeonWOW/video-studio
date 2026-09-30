@@ -12,6 +12,8 @@ import {
   LogOut,
   Mic2,
   Save,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react"
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
@@ -30,6 +32,7 @@ import { Boton } from "../components/ui/button"
 import { Insignia } from "../components/ui/badge"
 import { Entrada } from "../components/ui/input"
 import { Etiqueta } from "../components/ui/etiqueta"
+import { AreaTexto } from "../components/ui/textarea"
 import { Tarjeta, ContenidoTarjeta } from "../components/ui/tarjeta"
 import {
   Dialogo,
@@ -803,6 +806,9 @@ function segundos_texto(s: number): string {
 
 function PestanaEstadisticas() {
   const [stats, setStats] = useState<Estadisticas | null>(null)
+  const [ajuste, setAjuste] = useState("")
+  const [nota, setNota] = useState("")
+  const [enviando, setEnviando] = useState(false)
 
   useEffect(() => {
     api
@@ -810,6 +816,25 @@ function PestanaEstadisticas() {
       .then(setStats)
       .catch(() => setStats(null))
   }, [])
+
+  /** Apunta un ajuste y si gustó: la bitácora de valoraciones global. */
+  const valorar = async (le_gusto: boolean) => {
+    setEnviando(true)
+    try {
+      await api.post("/api/estadisticas/valoracion", {
+        ajuste: ajuste.trim(),
+        gusto: le_gusto,
+        nota: nota.trim(),
+      })
+      toast.success("valoración apuntada, gracias")
+      setAjuste("")
+      setNota("")
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setEnviando(false)
+    }
+  }
 
   if (!stats)
     return (
@@ -870,6 +895,44 @@ function PestanaEstadisticas() {
           </p>
         </div>
       )}
+
+      <div className="space-y-3 rounded-lg border p-4">
+        <div>
+          <p className="text-sm font-medium">¿Cómo te está saliendo?</p>
+          <p className="text-xs text-muted-foreground">
+            Apunta los ajustes que pruebas y si te convencieron: queda en
+            la bitácora para no repetir errores ni olvidar aciertos.
+          </p>
+        </div>
+        <Entrada
+          valor={ajuste}
+          alCambiar={(e) => setAjuste(e.target.value)}
+          placeholder="p. ej. glm-4.6 para el guion, tono menos solemne…"
+        />
+        <AreaTexto
+          valor={nota}
+          alCambiar={(e) => setNota(e.target.value)}
+          filas={2}
+          placeholder="nota (opcional, hasta 500 caracteres)"
+        />
+        <div className="flex justify-end gap-2">
+          <Boton
+            variante="contorno"
+            deshabilitado={!ajuste.trim() || enviando}
+            onClick={() => valorar(false)}
+          >
+            {enviando ? <Loader2 className="animate-spin" /> : <ThumbsDown />}
+            No me convence
+          </Boton>
+          <Boton
+            deshabilitado={!ajuste.trim() || enviando}
+            onClick={() => valorar(true)}
+          >
+            {enviando ? <Loader2 className="animate-spin" /> : <ThumbsUp />}
+            Me gusta
+          </Boton>
+        </div>
+      </div>
     </div>
   )
 }

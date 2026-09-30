@@ -32,9 +32,9 @@ from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
                                ruta_contenida)
 from ..nucleo.trabajos import TrabajoCancelado
 from ..pasos import (cartelas, catalogo_visual, comun, conservar, cta,
-                     direccion, encuadres, guia_estilo, moodboard, p2_brief,
-                     p3_guion, p4_voz, p5_revision_audio, p6_assets, redactor,
-                     registro, repaso, sonido, transiciones)
+                     direccion, encuadres, guia_estilo, marcas_tts, moodboard,
+                     p2_brief, p3_guion, p4_voz, p5_revision_audio, p6_assets,
+                     redactor, registro, repaso, sonido, transiciones)
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
@@ -1155,10 +1155,36 @@ def regrabar_escena(pid: str, escena: str, cuerpo: dict | None = None) -> dict:
         funcion = _correr_cadena(proyecto, escena, reescritura,
                                  params_guion, params_voz)
     else:
-        def unidad(trabajo):
-            return p4_voz.regrabar_escena(proyecto, escena, params_voz)
+        # LO ESCRITO A MANO MANDA también aquí (regla del original: el
+        # cajón lo aplica quien graba). Si la edición a mano de la
+        # pantalla dejó texto para esta escena en `params.unidades` y los
+        # datos del guion aún no lo tienen, la cadena lo aplica ANTES de
+        # regrabar: grabar sin más sería pagar la voz para que diga lo
+        # que ya no está escrito.
+        params_guion = estado.paso("guion").get("params", {})
+        cajon = ((params_guion.get("unidades") or {}).get(escena) or {})
+        manual = " ".join(str(cajon.get("texto") or "").split())
+        actual = next(
+            (e for e in (estado.datos_de("guion") or {}).get("escenas", [])
+             if isinstance(e, dict) and str(e.get("id")) == escena), None)
+        aplicar = bool(manual) and actual is not None and \
+            " ".join(marcas_tts.limpiar(
+                str(actual.get("narracion", ""))).split()) != manual
+        if aplicar:
 
-        funcion = _correr_unidad(proyecto, "voz", escena, unidad, params_voz)
+            def reescritura_manual(_trabajo):
+                ficha = dict(actual)
+                ficha["narracion"] = manual
+                return ficha, ""
+
+            funcion = _correr_cadena(proyecto, escena, reescritura_manual,
+                                     params_guion, params_voz)
+        else:
+            def unidad(trabajo):
+                return p4_voz.regrabar_escena(proyecto, escena, params_voz)
+
+            funcion = _correr_unidad(proyecto, "voz", escena, unidad,
+                                     params_voz)
     trabajo = GESTOR.lanzar(pid, "voz", funcion, unidades=[escena])
     return GESTOR.estado(trabajo.id)
 

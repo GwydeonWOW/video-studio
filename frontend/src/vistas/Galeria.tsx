@@ -56,6 +56,22 @@ interface ProyectoPapelera {
   apartado: string
 }
 
+interface PresetPapelera {
+  id: string
+  nombre: string
+  tipo: string
+  tipo_nombre?: string
+  resumen?: string
+}
+
+interface PesoPreset {
+  id: string
+  nombre: string | null
+  tipo: string | null
+  ficheros: number
+  megas: number
+}
+
 const COLOR_PUNTO: Record<string, string> = {
   vacio: "bg-muted-foreground/20",
   ok: "bg-emerald-500",
@@ -485,6 +501,60 @@ function DialogoPapelera({
   alCambiar: () => void
 }) {
   const [pendiente, setPendiente] = useState<InventarioPapelera | null>(null)
+  const [presets, setPresets] = useState<PresetPapelera[] | null>(null)
+  const [peso_preset, setPesoPreset] = useState<PesoPreset | null>(null)
+
+  const cargar_presets = useCallback(() => {
+    api
+      .get<{ papelera: PresetPapelera[] }>("/api/presets-canal")
+      .then((r) => setPresets(r.papelera ?? []))
+      .catch(() => setPresets([]))
+  }, [])
+
+  useEffect(() => {
+    if (abierto) cargar_presets()
+    else {
+      setPresets(null)
+      setPesoPreset(null)
+    }
+  }, [abierto, cargar_presets])
+
+  const restaurar_preset = async (prid: string) => {
+    try {
+      await api.post(`/api/presets-canal/${prid}/restaurar`)
+      toast.success("preset restaurado")
+      setPesoPreset(null)
+      cargar_presets()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  /** El peso ANTES de borrar, igual que con los proyectos. */
+  const pre_eliminar_preset = async (prid: string) => {
+    setPesoPreset(null)
+    try {
+      setPesoPreset(
+        await api.get<PesoPreset>(`/api/presets-canal/${prid}/peso`),
+      )
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
+
+  const eliminar_preset = async () => {
+    if (!peso_preset) return
+    try {
+      await api.borrar(
+        `/api/presets-canal/${peso_preset.id}/papelera?confirmar=true`,
+      )
+      toast.success("preset eliminado para siempre")
+      setPesoPreset(null)
+      cargar_presets()
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    }
+  }
 
   const restaurar = async (carpeta: string) => {
     try {
@@ -654,6 +724,89 @@ function DialogoPapelera({
             </Boton>
           </div>
         )}
+
+        <div className="border-t pt-4">
+          <p className="text-sm font-medium">Presets de canal apartados</p>
+          <p className="mb-2 text-xs text-muted-foreground">
+            Los estilos de canal van a una papelera propia: se restauran o
+            se eliminan del todo, uno a uno.
+          </p>
+          <div className="max-h-56 space-y-2 overflow-y-auto">
+            {!presets ? (
+              <p className="py-4 text-center text-sm text-muted-foreground">
+                cargando…
+              </p>
+            ) : presets.length === 0 ? (
+              <p className="py-4 text-center text-sm text-muted-foreground">
+                sin presets apartados
+              </p>
+            ) : (
+              presets.map((pr) =>
+                peso_preset?.id === pr.id ? (
+                  <div
+                    key={pr.id}
+                    className="space-y-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2"
+                  >
+                    <p className="flex items-center gap-2 text-sm font-medium">
+                      <AlertTriangle className="h-4 w-4 text-destructive" />
+                      Se pierde «{pr.nombre}» para siempre
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {peso_preset.ficheros} ficheros · {peso_preset.megas} MB
+                    </p>
+                    <div className="flex justify-end gap-2">
+                      <Boton
+                        variante="contorno"
+                        tamano="pequeno"
+                        onClick={() => setPesoPreset(null)}
+                      >
+                        Cancelar
+                      </Boton>
+                      <Boton
+                        variante="destructivo"
+                        tamano="pequeno"
+                        onClick={eliminar_preset}
+                      >
+                        <Trash2 /> Eliminar
+                      </Boton>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    key={pr.id}
+                    className="flex items-center justify-between gap-2 rounded-md border px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{pr.nombre}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {pr.tipo_nombre || pr.tipo}
+                        {pr.resumen ? ` · ${pr.resumen}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex gap-1">
+                      <Boton
+                        variante="fantasma"
+                        tamano="icono"
+                        title="Restaurar preset"
+                        onClick={() => restaurar_preset(pr.id)}
+                      >
+                        <Undo2 />
+                      </Boton>
+                      <Boton
+                        variante="fantasma"
+                        tamano="icono"
+                        title="Eliminar para siempre"
+                        onClick={() => pre_eliminar_preset(pr.id)}
+                      >
+                        <Trash2 />
+                      </Boton>
+                    </div>
+                  </div>
+                ),
+              )
+            )}
+          </div>
+        </div>
       </ContenidoDialogo>
     </Dialogo>
   )

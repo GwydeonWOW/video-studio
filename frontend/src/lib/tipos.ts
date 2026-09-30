@@ -319,6 +319,14 @@ export interface PropuestaVoz {
   catalogo?: number
 }
 
+/** Una voz del catálogo ElevenLabs de la cuenta (GET /api/voces). */
+export interface VozCatalogo {
+  voice_id: string
+  nombre: string
+  etiquetas: Record<string, unknown>
+  idiomas: string[]
+}
+
 /** Resultado de la cata de voz (POST /{pid}/voz/previsualizar). */
 export interface PrevisualizacionVoz {
   archivo: string

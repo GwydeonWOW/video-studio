@@ -1342,6 +1342,23 @@ function DialogoVisor({
   const escena = datos?.escenas[indice]
   const ultima = datos ? indice >= datos.escenas.length - 1 : true
 
+  // el karaoke: la última palabra cuyo inicio ya pasó es la que SUENA,
+  // las anteriores se leyeron y las demás esperan. Los tiempos de las
+  // palabras son absolutos en el audio de la escena — el mismo reloj
+  // que t_audio — y pulsar una palabra salta hasta ella
+  const palabras = escena?.palabras ?? []
+  let indice_palabra = -1
+  for (let i = 0; i < palabras.length; i++) {
+    if ((palabras[i].inicio ?? 0) <= t_audio) indice_palabra = i
+    else break
+  }
+  const saltar_a = (t: number) => {
+    if (!audio_ref.current) return
+    audio_ref.current.currentTime = Math.max(0, t)
+    audio_ref.current.play().catch(() => setSeguido(false))
+    setSeguido(true)
+  }
+
   // al cambiar de plano: colocarse en su ventana dentro del audio de la
   // escena y seguir si iba seguido (el plano ENTRA en su t_in, no en 0)
   useEffect(() => {
@@ -1560,9 +1577,30 @@ function DialogoVisor({
               ))}
             </div>
 
-            <p className="text-sm text-muted-foreground">
-              {sinAnotaciones(escena.narracion)}
-            </p>
+            {palabras.length > 0 ? (
+              <p className="flex flex-wrap gap-x-1.5 gap-y-0.5 text-sm leading-relaxed">
+                {palabras.map((p, i) => (
+                  <button
+                    key={i}
+                    onClick={() => saltar_a(p.inicio)}
+                    title={`saltar a ${p.inicio.toFixed(1)} s`}
+                    className={
+                      i === indice_palabra
+                        ? "rounded-sm bg-primary/25 font-semibold text-foreground underline decoration-primary decoration-2 underline-offset-2"
+                        : i < indice_palabra
+                          ? "text-foreground"
+                          : "text-muted-foreground/70 hover:text-foreground"
+                    }
+                  >
+                    {p.palabra}
+                  </button>
+                ))}
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {sinAnotaciones(escena.narracion)}
+              </p>
+            )}
           </div>
         )}
 
