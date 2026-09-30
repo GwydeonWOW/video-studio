@@ -57,6 +57,21 @@ TAREAS = [
 PESTANAS = {"origen": "Origen", "guion": "Guion", "voz": "Voz",
             "montaje": "Montaje"}
 
+#: Las TANDAS del botón «generar»: qué pestañas recorre cada gesto y
+#: qué tareas se quedan FUERA («sin»: mirar sin montar). Es el porte de
+#: las TANDAS_LIGHT del original adaptado a estas pestañas: el botón de
+#: «vídeo» de allá era la pestaña de vídeo SIN los rótulos, y aquí el
+#: equivalente es montaje SIN rótulos ni render — las imágenes, que es
+#: lo que se paga, con el montaje entero a un botón de distancia.
+TANDAS = {
+    "guion": {"nombre": "El guion", "pestanas": ["guion"], "sin": []},
+    "voz": {"nombre": "La locución", "pestanas": ["voz"], "sin": []},
+    "video": {"nombre": "Las imágenes", "pestanas": ["montaje"],
+              "sin": ["callouts", "render"]},
+    "render": {"nombre": "El vídeo montado", "pestanas": ["montaje"],
+               "sin": []},
+}
+
 TAREAS_POR_ID = {t["id"]: t for t in TAREAS}
 
 #: la receta COMPLETA (la que corre la tanda multi-vídeo)

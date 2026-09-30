@@ -508,6 +508,225 @@ def lanzar_tanda(cuerpo: dict | None = None) -> dict:
     return GESTOR.estado(lanzado.id)
 
 
+# ------------------------------------------------- generar: plan y cadena
+#
+# El porte de /api/proyectos/{pid}/generar del original: UN botón que
+# recorre varias pestañas en UN trabajo (la cadena), con el plan delante
+# — lo que se va a hacer, qué se salta y cuánto cuesta, dichos ANTES de
+# pulsar. Una cifra en la pantalla y otra durante la generación son dos
+# mentiras, y la segunda tarda diez minutos en descubrirse.
+
+def _pestanas_pedidas(datos: dict) -> list[str]:
+    """Las pestañas que pide el cuerpo, en el orden del pipeline.
+
+    Acepta una `tanda` (las tandas del botón generar, `recetas.TANDAS`)
+    o `pestanas` sueltas; la tanda manda. Levanta 400 con el catálogo si
+    se pide algo que no existe — un nombre mal escrito no puede caer al
+    vacío y pintar un botón que no hace nada.
+    """
+    tanda = str(datos.get("tanda") or "").strip()
+    if tanda:
+        ficha = recetas.TANDAS.get(tanda)
+        if not ficha:
+            raise HTTPException(400, "tanda desconocida: "
+                                      + ", ".join(recetas.TANDAS))
+        return list(ficha["pestanas"])
+    crudo = datos.get("pestanas")
+    if isinstance(crudo, str):
+        pedidas = [p for p in crudo.split(",") if p.strip()]
+    else:
+        pedidas = [str(p) for p in (crudo or []) if str(p).strip()]
+    desconocidas = [p for p in pedidas if p not in recetas.PESTANAS]
+    if desconocidas:
+        raise HTTPException(400, "pestañas desconocidas: "
+                                 + ", ".join(desconocidas))
+    # el ORDEN lo pone el pipeline, no quien llama: es la única manera
+    # de que la cadena siempre llegue al render con todo lo de arriba
+    return [p for p in recetas.PESTANAS if p in pedidas]
+
+
+def _sin_de_la_tanda(datos: dict) -> set[str]:
+    """Ids de tarea que la tanda deja fuera (mirar sin montar)."""
+    tanda = str(datos.get("tanda") or "").strip()
+    if not tanda:
+        return set()
+    ficha = recetas.TANDAS.get(tanda)
+    return set(ficha["sin"]) if ficha else set()
+
+
+def _con_origen(estado: Estado, pestanas: list[str]) -> list[str]:
+    """La pestaña Origen delante si su paso no está hecho y la cadena
+    pasa de ahí: sin material no hay guion, y el plan tiene que decirlo
+    ANTES de que la cadena reviente en el brief."""
+    if not pestanas or "origen" in pestanas:
+        return pestanas
+    if pestanas[0] in ("guion", "voz", "montaje") \
+            and estado.estado_de("ingesta") != "ok":
+        return ["origen"] + pestanas
+    return pestanas
+
+
+def _plan_de_generacion(proyecto: Proyecto, pestanas: list[str],
+                        modo: str, sin: set[str] = ()) -> dict:
+    """Qué se va a hacer, qué se salta y cuánto cuesta. NO lanza nada.
+
+    Es lo que se lee al lado del botón antes de pulsarlo. El coste sale
+    de los `estimar` de cada paso — los mismos números que dará el
+    trabajo — y donde el paso no puede saberlo todavía (las imágenes
+    antes del guion, los caracteres de voz), lo DICE en vez de
+    inventarlo: una cifra inventada aquí es la primera de las dos
+    mentiras. Aquí no hay segundos estimados porque el gestor no pinta
+    barras por tiempo (sus barras son de texto); las estadísticas
+    medidas son otro capítulo.
+    """
+    estado = Estado(proyecto)
+    calidad = str((estado.paso("assets").get("params") or {}).get("calidad")
+                  or "low")
+    fases, pendientes = [], 0
+    llamadas, imagenes, caracteres = 0, 0, 0
+    sin_saber: list[str] = []
+    for pestana in pestanas:
+        filas = []
+        for tarea in recetas.TAREAS:
+            if tarea["pestana"] != pestana or tarea["id"] in sin:
+                continue
+            paso = tarea["paso"]
+            al_dia = estado.estado_de(paso) == "ok"
+            se_hace = (modo == "todo" or not al_dia)
+            params = estado.paso(paso).get("params") \
+                or registro.params_defecto_de(paso)
+            previsto = registro.modulo_de(paso).estimar(params)
+            filas.append({**tarea, "estado": estado.estado_de(paso),
+                          "al_dia": al_dia, "se_hace": se_hace,
+                          "previsto": previsto})
+            if se_hace:
+                pendientes += 1
+                # los "?" no se suman ni se callan: se dicen en
+                # coste.sin_saber («depende del guion que aún no existe»)
+                for clave in ("llamadas_llm", "imagenes", "caracteres_voz"):
+                    valor = previsto.get(clave)
+                    if isinstance(valor, (int, float)) \
+                            and not isinstance(valor, bool):
+                        valor = int(valor)
+                        if clave == "llamadas_llm":
+                            llamadas += valor
+                        elif clave == "imagenes":
+                            imagenes += valor
+                        else:
+                            caracteres += valor
+                    elif valor == "?":
+                        sin_saber.append(paso)
+        fases.append({"pestana": pestana, "nombre": recetas.PESTANAS[pestana],
+                      "tareas": filas})
+    # la puerta del guion, DICHA ANTES: la cadena para (sin fallo) antes
+    # de grabar una locución que nadie ha aprobado — gastar ElevenLabs
+    # en un guion en revisión. En el plan se ve; dentro del trabajo la
+    # para `paro = guion_sin_aprobar`.
+    impedimentos = []
+    for fase in fases:
+        for tarea in fase["tareas"]:
+            if tarea["paso"] == "voz" and tarea["se_hace"] \
+                    and not estado.esta_aprobado("guion"):
+                impedimentos.append({
+                    "tarea": "voz",
+                    "que": "aprueba el guion (paso 3) antes de grabar "
+                           "la locución: la cadena parará ahí"})
+    usd_llm = round(llamadas * comun.COSTE_LLAMADA_LLAM["glm"], 4)
+    usd_imagenes = round(
+        imagenes * comun.COSTE_IMAGEN.get(calidad, comun.COSTE_IMAGEN["low"]), 4)
+    usd_voz = round(caracteres / comun.CARACTERES_POR_DOLAR, 4) \
+        if caracteres else 0.0
+    return {
+        "pestanas": pestanas, "modo": modo, "fases": fases,
+        "pendientes": pendientes, "impedimentos": impedimentos,
+        "coste": {"llamadas_llm": llamadas, "imagenes": imagenes,
+                  "caracteres_voz": caracteres, "calidad": calidad,
+                  "usd_llm": usd_llm, "usd_imagenes": usd_imagenes,
+                  "usd_voz": usd_voz,
+                  "usd_total": round(usd_llm + usd_imagenes + usd_voz, 4),
+                  "sin_saber": sorted(set(sin_saber))},
+        "tandas": recetas.TANDAS,
+        "trabajo": GESTOR.activo_de(proyecto.id) or {},
+    }
+
+
+@router.get("/{pid}/generar", dependencies=[_SESION])
+def plan_de_generar(pid: str, tanda: str = "", pestanas: str = "",
+                    modo: str = "pendiente") -> dict:
+    """Lo que va a hacer, qué se salta y cuánto cuesta. NO lanza nada."""
+    proyecto = _proyecto_o_404(pid)
+    try:
+        modo = recetas.validar_modo(modo)
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    datos = {"tanda": tanda,
+             "pestanas": [p for p in pestanas.split(",") if p.strip()]}
+    if not datos["tanda"] and not datos["pestanas"]:
+        # sin pedir nada: el plan de la cadena COMPLETA
+        datos["pestanas"] = list(recetas.PESTANAS)
+    elegidas = _con_origen(Estado(proyecto), _pestanas_pedidas(datos))
+    return _plan_de_generacion(proyecto, elegidas, modo,
+                               _sin_de_la_tanda(datos))
+
+
+@router.post("/{pid}/generar", status_code=202, dependencies=_MUTAR)
+def generar_video(pid: str, cuerpo: dict | None = None) -> dict:
+    """Lanza la cadena: varias pestañas en UN solo trabajo.
+
+    Los `params` que vengan se guardan ANTES de lanzar (el trabajo lee
+    los guardados). El modo `pendiente` ES el retomar: se salta lo que
+    ya está al día, que es la doctrina del original — el estado del
+    proyecto es el estado del arranque, y cancelar corta sin perder lo
+    pagado. Los impedimentos del plan NO bloquean el lanzamiento (la
+    puerta del guion para el trabajo sin fallo, igual que la receta de
+    una pestaña); lo que sí bloquea es no tener nada que hacer.
+    """
+    cuerpo = cuerpo or {}
+    proyecto = _proyecto_o_404(pid)
+    try:
+        modo = recetas.validar_modo(cuerpo.get("modo"))
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    elegidas = _con_origen(Estado(proyecto), _pestanas_pedidas(cuerpo))
+    sin = _sin_de_la_tanda(cuerpo)
+    # PARAMS primero, dentro del cerrojo del proyecto: nadie lanza sobre
+    # unos params que aún no están escritos
+    params = cuerpo.get("params") or {}
+    if not isinstance(params, dict):
+        raise HTTPException(400, "params tiene que ser {paso: {clave: valor}}")
+    with lock_de(pid):
+        estado = Estado(proyecto)
+        for paso, valores in params.items():
+            paso = _paso_o_404(paso)
+            if not isinstance(valores, dict) or not valores:
+                raise HTTPException(400, f"params de {paso} vacíos o malformados")
+            if paso == "guion" and "cta" in valores:
+                try:
+                    cta.normalizar(valores["cta"], estricto=True)
+                except ValueError as fallo:
+                    raise HTTPException(400, str(fallo)) from None
+            estado.guardar_params(paso, valores)
+        if GESTOR.activo_de(pid):
+            raise HTTPException(409, "hay un trabajo en marcha en ese proyecto")
+        plan = _plan_de_generacion(proyecto, elegidas, modo, sin)
+        if not plan["pendientes"]:
+            raise HTTPException(400, "nada pendiente: todo lo pedido está "
+                                     "al día (lanza con modo 'todo' para "
+                                     "rehacerlo)")
+        # la CADENA son todas las tareas pedidas, también las al día: el
+        # trabajo las salta con su línea de avance, y quien mira el
+        # registro ve la misma historia que contaba el plan
+        cadena = [t["id"] for fase in plan["fases"] for t in fase["tareas"]]
+        lanzado = GESTOR.lanzar(pid, "generar",
+                                lambda t: _correr_receta(proyecto, cadena,
+                                                         modo, t))
+        proyecto.bitacora("generacion_lanzada",
+                          {"pestañas": elegidas, "modo": modo, "tanda":
+                           cuerpo.get("tanda") or "", "trabajo": lanzado.id})
+    return {"trabajo": GESTOR.estado(lanzado.id), "pestanas": elegidas,
+            "modo": modo, "plan": plan}
+
+
 @router.get("/{pid}/previsualizacion", dependencies=[_SESION])
 def leer_previsualizacion(pid: str) -> dict:
     """Las piezas para ver el vídeo sin montarlo. -> {escenas, ...}

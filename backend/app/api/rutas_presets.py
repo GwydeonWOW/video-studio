@@ -32,10 +32,13 @@ from .. import seguridad
 from ..config import AJUSTES
 from ..motores import llm, voz_elevenlabs
 from ..nucleo import grafismo
-from ..nucleo.estado import Estado
-from ..nucleo.proyecto import Proyecto, ahora, escribir_json, ruta_contenida
-from ..pasos import (comun, enrutar_estilo, guia_estilo, moodboard, p4_voz,
-                     presets_canal, presets_light, presets_voz, registro)
+from ..nucleo.estado import GRAFO, Estado
+from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
+                               ruta_contenida)
+from ..pasos import (comun, cta, enrutar_estilo, guia_estilo, moodboard,
+                     p3_guion, p4_voz, presets_canal, presets_light,
+                     presets_voz, registro)
+from .rutas_proyectos import _ficha_proyecto, _id_libre, _slug
 from .rutas_trabajos import GESTOR
 
 router = APIRouter(prefix="/api", tags=["presets"])
@@ -828,16 +831,40 @@ def borrar_aportada(nombre: str) -> dict:
 
 @router.post("/presets-light", status_code=202, dependencies=_MUTAR)
 def crear_light(cuerpo: dict) -> dict:
-    """Crea el taller y lanza la generación del canal entero."""
+    """Crea el taller y lanza la generación del canal entero.
+
+    Con `taller` se RETOMA uno que se quedó a medias: se salta lo que
+    ya salió bien (modo reanudar de `_correr_tanda`) y sigue por donde
+    iba. Es lo que convierte un fallo de red a mitad de la guía en
+    volver a pulsar, en vez de en rehacer el tono y la voz que ya
+    estaban escritos. Retomar no puede perder las aportadas: se vuelven
+    a sembrar, y las que ya estaban se quedan como están.
+    """
+    datos = cuerpo if isinstance(cuerpo, dict) else {}
     try:
-        encargo = presets_light.validar_encargo((cuerpo or {}).get("encargo"))
+        encargo = presets_light.validar_encargo(datos.get("encargo"))
     except presets_light.ErrorEncargo as fallo:
         raise _a_400(fallo)
-    taller = _crear_taller(encargo)
+    pedido = str(datos.get("taller") or "").strip()
+    retomar = False
+    if pedido:
+        taller = _taller_o_404(pedido)
+        if GESTOR.activo_de(pedido):
+            raise HTTPException(409, "ese taller ya tiene un trabajo en marcha")
+        # el encargo del cuerpo REFRESCA el del taller: la pantalla lo
+        # reenvía entero, y mandar el de disco sería ignorar lo único
+        # que quien llama puede haber cambiado (el feedback del rehacer)
+        _guardar_encargo(taller, encargo)
+        retomar = True
+    else:
+        taller = _crear_taller(encargo)
     _sembrar_aportadas(taller, encargo)
-    funcion = _correr_taller(taller, None)
+    taller.bitacora("taller_lanzado", {"encargo": encargo["nombre"],
+                                       "retomado": retomar})
+    funcion = _correr_taller(taller, None, retomar=retomar)
     trabajo = GESTOR.lanzar(taller.id, "taller", funcion)
-    return {"taller": taller.id, "trabajo": GESTOR.estado(trabajo.id)}
+    return {"taller": taller.id, "retomado": retomar,
+            "trabajo": GESTOR.estado(trabajo.id)}
 
 
 @router.get("/presets-light/{prid}", dependencies=[_SESION])
@@ -1106,3 +1133,220 @@ def escucha_light(prid: str) -> dict:
     estado = Estado(taller)
     params = estado.paso("voz").get("params", {})
     return p4_voz.previsualizar(taller, params, segundos=18)
+
+
+# --------------------------------------------- del estilo al vídeo light
+#
+# El cierre del modo light: el estilo que se generó se convierte en un
+# VÍDEO. Es un proyecto NORMAL y se ve en la lista — no un taller: un
+# vídeo se hace por donde se quiera pero es el mismo vídeo, y se puede
+# abrir en el modo editor y seguir ahí.
+
+def _sembrar_video_light(params_por_paso: dict, datos: dict) -> list[str]:
+    """Las decisiones de la pantalla light en los cajones de siempre.
+
+    Nada de esto es una vía nueva: el material va al paso Origen y la
+    duración y las llamadas a la acción al guion, que es donde los pone
+    quien edita a mano — la única forma de que las dos pantallas no se
+    separen. Lo que no se puede sembrar se dice en un aviso, no se calla.
+    """
+    avisos: list[str] = []
+    ingesta = params_por_paso.setdefault("ingesta", {})
+    material = datos.get("material")
+    if isinstance(material, str) and material.strip():
+        ingesta["texto"] = material.strip()
+    elif material is not None:
+        avisos.append("sin material: escribe el texto en el paso Origen "
+                      "antes de generar")
+    if datos.get("titulo_material"):
+        ingesta["titulo"] = str(datos["titulo_material"])[:200]
+    guion = params_por_paso.setdefault("guion", {})
+    if datos.get("duracion_min") is not None:
+        try:
+            duracion = float(datos["duracion_min"])
+        except (TypeError, ValueError):
+            duracion = 0.0
+        if 0.5 <= duracion <= 180:
+            guion["duracion_min"] = duracion
+        else:
+            avisos.append("duración no válida: se queda la guardada")
+    if datos.get("cta") is not None:
+        try:
+            guion["cta"] = cta.normalizar(datos["cta"], estricto=True)
+        except ValueError as fallo:
+            avisos.append(f"llamadas a la acción ignoradas: {fallo}")
+    return avisos
+
+
+@router.post("/presets-light/{prid}/video", status_code=201,
+             dependencies=_MUTAR)
+def crear_video_light(prid: str, cuerpo: dict | None = None) -> dict:
+    """Un proyecto de vídeo nuevo con este estilo ya aplicado.
+
+    404 si el estilo no existe (una dirección equivocada, no una
+    petición mal escrita) y 400 si no es de tipo canal: el modo light
+    hace vídeos con estilos de canal.
+
+    El estilo se aplica con el MISMO código que el botón del editor
+    (`presets_canal.cambios_para` + `restaurar_moodboard`): un segundo
+    camino que copiara las claves a mano se quedaría viejo el día que
+    un preset guarde una más.
+    """
+    try:
+        ficha = presets_canal.leer(prid)
+    except presets_canal.ErrorPreset as fallo:
+        raise HTTPException(404, str(fallo))
+    if ficha.get("tipo") != "canal":
+        raise HTTPException(400, f"el preset {prid!r} es de tipo "
+                                 f"{ficha.get('tipo')!r}: el modo light "
+                                 "hace vídeos con estilos de canal")
+    datos = cuerpo.get("encargo") if isinstance(cuerpo, dict) \
+        and isinstance(cuerpo.get("encargo"), dict) else (cuerpo or {})
+    nombre = " ".join(str(datos.get("nombre") or "").split()) \
+        or f"Vídeo · {ficha.get('nombre') or prid}"
+    pid = _id_libre(_slug(nombre))
+    proyecto = Proyecto(AJUSTES.carpeta_proyectos / pid)
+    proyecto.escribir({"id": pid, "nombre": nombre,
+                       "canal": ficha.get("nombre", ""),
+                       "idioma": presets_canal.idioma_de(ficha) or "es",
+                       "creado": ahora(), "actualizado": ahora(),
+                       # de dónde nació: el estilo light lo aplica, la
+                       # pantalla lo enseña, y borrar el estilo no toca
+                       # al vídeo ya nacido (los valores están COPIADOS)
+                       "estilo_light": prid})
+    estado = Estado(proyecto)
+    params_por_paso = {paso: registro.params_defecto_de(paso)
+                       for paso in GRAFO}
+    # EL PRESET ES EL ESTILO DE ESTE VÍDEO: se aplican sus valores sobre
+    # los defectos (aquí no hay estilo global que sembrar — el vídeo
+    # hereda ESTE preset, no el que esté puesto en la pestaña Estilo)
+    cambios = presets_canal.cambios_para(
+        ficha, {paso: params_por_paso.get(paso, {})
+                for paso in _PASOS_PRESET})
+    for paso, valores in cambios.items():
+        params_por_paso.setdefault(paso, {}).update(valores)
+    avisos = _sembrar_video_light(params_por_paso, datos)
+    for paso in GRAFO:
+        estado.guardar_params(paso, params_por_paso[paso])
+    lamina_devueltas = presets_canal.restaurar_moodboard(ficha)
+    proyecto.bitacora("video_light_creado",
+                      {"preset": prid, "estilo": ficha.get("nombre"),
+                       "nombre": nombre, "avisos": avisos})
+    return {"proyecto": _ficha_proyecto(proyecto),
+            "estilo": {"id": prid, "nombre": ficha.get("nombre")},
+            "aplicado": sorted(cambios), "avisos": avisos,
+            "lamina_devueltas": lamina_devueltas}
+
+
+# ------------------------------------------------ talleres a medias
+
+def _taller_o_404(tid: str) -> Proyecto:
+    """Un proyecto TALLER de estilo por id, o el error que corresponde."""
+    if not id_valido(tid):
+        raise HTTPException(404, f"el taller {tid} ya no está en el disco")
+    taller = Proyecto(AJUSTES.carpeta_proyectos / tid)
+    if not taller.existe():
+        raise HTTPException(404, f"el taller {tid} ya no está en el disco")
+    if not taller.leer().get("taller"):
+        raise HTTPException(400, f"{tid} no es un taller de estilo")
+    return taller
+
+
+@router.delete("/presets-light/talleres/{taller_id}", status_code=204,
+               dependencies=_MUTAR)
+def descartar_taller_light(taller_id: str):
+    """Tira un intento de estilo a medias. A la papelera, no al vacío.
+
+    Sólo si es suelto: el taller de un estilo guardado es una pieza de
+    él (rehacer el tono sin él obligaría a rehacerlo todo), y se va con
+    el estilo al borrarlo. Aquí se limpian los que quedaron huérfanos
+    por un fallo a mitad de generación.
+    """
+    taller = _taller_o_404(taller_id)
+    if GESTOR.activo_de(taller_id):
+        raise HTTPException(409, "ese taller tiene un trabajo en marcha")
+    # su dueño puede estar activo O en la papelera de presets: mientras
+    # el estilo exista en algún sitio, el taller es suyo
+    listado = presets_canal.listar()
+    candidatas = [f for grupo in (listado.get("presets") or {}).values()
+                  for f in grupo] + (listado.get("papelera") or [])
+    dueno = next(
+        (f for f in candidatas
+         if str(((f.get("datos") or {}).get("origen") or {})
+                .get("taller") or "") == taller_id), None)
+    if dueno is not None:
+        raise HTTPException(409, f"el taller {taller_id} es de un estilo "
+                                 "guardado: borrar el estilo y se va con él")
+    papelera = AJUSTES.datos / "papelera"
+    papelera.mkdir(parents=True, exist_ok=True)
+    destino, indice = papelera / taller_id, 2
+    while destino.exists():
+        destino = papelera / f"{taller_id}_{indice}"
+        indice += 1
+    shutil.move(str(taller.raiz), str(destino))
+
+
+# ---------------------------------------------------- estimación previa
+
+@router.post("/estimacion", dependencies=[_SESION])
+def estimar_video(cuerpo: dict | None = None) -> dict:
+    """Lo que va a salir de esa duración: palabras, planos y dólares.
+
+    Sin proyecto delante: es la cuenta que la pantalla light hace ANTES
+    de crear nada (¿merece la pena este vídeo a diez minutos?). La
+    misma aritmética de los pasos — `p3_guion._horquilla` para las
+    palabras, el ritmo de `presets_light` para las escenas, el corte
+    3-6 s por plano para las imágenes — para que la cifra de aquí y la
+    del botón generar no sean dos versiones de la verdad.
+    """
+    datos = cuerpo if isinstance(cuerpo, dict) else {}
+    try:
+        duracion_min = float(datos.get("duracion_min") or 10)
+    except (TypeError, ValueError):
+        raise _a_400(ValueError("duracion_min tiene que ser un número "
+                                "de minutos"))
+    duracion_min = min(180.0, max(0.5, duracion_min))
+    duracion_s = int(round(duracion_min * 60))
+    if datos.get("ritmo") or datos.get("ritmo_min") is not None \
+            or datos.get("ritmo_max") is not None:
+        ritmo = (presets_light.ritmo_de(datos.get("ritmo"))
+                 if datos.get("ritmo")
+                 else presets_light.ritmo_parecido(datos.get("ritmo_min"),
+                                                   datos.get("ritmo_max")))
+    else:
+        ritmo = presets_light.ritmo_de(presets_light.RITMO_POR_DEFECTO)
+    horquilla = p3_guion._horquilla(
+        duracion_min, {"min": ritmo["ritmo_min"], "max": ritmo["ritmo_max"]})
+    if not horquilla:
+        raise _a_400(ValueError("duracion_min tiene que ser un número "
+                                "de minutos"))
+    # CUÁNTOS PLANOS: la duración entre la media del corte (el mismo
+    # 3-6 s que obedece el montaje en p6)
+    assets = registro.params_defecto_de("assets")
+    media = (float(assets.get("planos_min_s") or 3.0)
+             + float(assets.get("planos_max_s") or 6.0)) / 2.0
+    planos = max(1, round(duracion_s / max(0.5, media)))
+    calidad = str(datos.get("calidad") or AJUSTES.calidad_imagen
+                  or "low").lower()
+    por_imagen = comun.COSTE_IMAGEN.get(calidad, comun.COSTE_IMAGEN["low"])
+    usd_imagenes = round(planos * por_imagen, 3)
+    caracteres = int(round(horquilla["objetivo"] * 6.1))
+    usd_tts = round(caracteres / comun.CARACTERES_POR_DOLAR, 3)
+    usd_llm = round(2 * comun.COSTE_LLAMADA_LLAM["glm"], 4)
+    return {
+        "duracion_min": duracion_min, "duracion_objetivo_s": duracion_s,
+        "idioma": str(datos.get("idioma") or "es"),
+        "ritmo": {"id": ritmo["id"], "nombre": ritmo["nombre"],
+                  "media_escena_s": ritmo["media_s"]},
+        "palabras": {"objetivo": horquilla["objetivo"],
+                     "minimo": horquilla["min"], "maximo": horquilla["max"],
+                     "escenas": horquilla["escenas"],
+                     "palabras_escena": horquilla["palabras_escena"]},
+        "planos": {"total": planos, "media_s": round(media, 2),
+                   "con_imagen": planos},
+        "coste": {"calidad": calidad, "usd_por_imagen": por_imagen,
+                  "imagenes": planos, "usd_imagenes": usd_imagenes,
+                  "caracteres_voz": caracteres, "usd_tts": usd_tts,
+                  "usd_llm": usd_llm,
+                  "usd_total": round(usd_imagenes + usd_tts + usd_llm, 3)},
+    }
