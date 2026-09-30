@@ -22,6 +22,21 @@ Responde SOLO JSON: {"tema": str, "angulo": str, "publico": str,
 "puntos": [str], "tono": str, "formato": {"min": int, "max": int}}"""
 
 
+#: Código de idioma -> nombre EN INGLÉS para el prompt de imagen. Al
+#: generador se le habla en inglés —la guía, las reglas de la casa y la
+#: descripción del plano van en inglés— así que decirle «español» ahí
+#: dentro es pedirle que adivine. UNA sola tabla (regla del original):
+#: dos tablas de idiomas se desincronizan el día que se añada uno.
+#: Vacío cuando no lo conoce, y es deliberado: mejor no decir nada que
+#: colarle un código de dos letras, que lo dibujaría tan tranquilo.
+NOMBRE_IDIOMA_EN = {"es": "Spanish", "en": "English"}
+
+
+def nombre_idioma_en(idioma: str) -> str:
+    codigo = str(idioma or "").strip().lower()
+    return NOMBRE_IDIOMA_EN.get(codigo, "")
+
+
 def params_defecto() -> dict:
     return {}
 

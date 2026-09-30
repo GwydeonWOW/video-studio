@@ -425,7 +425,8 @@ def _tarea_referencias(taller, estado, encargo, trabajo) -> dict:
     guia = guia_estilo.guia_de(estado.paso("assets").get("params", {}))
     clave = moodboard.clave_de(guia)
     resultado = moodboard.generar(clave, guia, avisar=trabajo.avance,
-                                  proyecto_id=taller.id)
+                                  proyecto_id=taller.id,
+                                  idioma=str(encargo.get("idioma") or ""))
     # aprobar mueve la propuesta al banco; si todo estaba ya aprobado no
     # hay propuesta y no hay nada que mover (retomar a medias)
     if (moodboard.raiz_propuestas() / clave).is_dir():

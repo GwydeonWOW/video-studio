@@ -2497,7 +2497,9 @@ def generar_moodboard(pid: str, cuerpo: dict | None = None) -> dict:
                                  peticiones={k: str(v) for k, v
                                              in peticiones.items()},
                                  calidad=calidad, avisar=trabajo.avance,
-                                 proyecto_id=proyecto.id)
+                                 proyecto_id=proyecto.id,
+                                 idioma=str(proyecto.leer()
+                                            .get("idioma", "es")))
 
     trabajo = GESTOR.lanzar(pid, "moodboard", funcion, unidades=[])
     return GESTOR.estado(trabajo.id)

@@ -46,7 +46,7 @@ from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
 from . import (cartelas as cartelas_motor, catalogo_visual, comun,
                encuadres, guia_estilo, marcas_tts, p2_brief)
-from ..motores import imagen_glm
+from ..motores import imagen_glm, reglas
 from ..motores.guion import segmentar
 
 
@@ -89,6 +89,13 @@ def _capas_catalogo(params: dict, sid: str) -> list[str]:
     if fisicos:
         lineas.append("Characters in frame, draw each one exactly as "
                       "described: " + " | ".join(fisicos))
+        # Las reglas de reparto nacieron para la hoja de personaje del
+        # original; aquí no hay hoja —el reparto entra como texto en cada
+        # plano— así que viajan PEGADAS a la capa que describen: es el
+        # sitio donde el generador dibuja a la gente.
+        bloque_reparto = reglas.bloque_prompt("reparto")
+        if bloque_reparto:
+            lineas.append(bloque_reparto)
     tono = " ".join(str(beat.get("tono") or "").split())
     if tono:
         lineas.append(f"Mood: {tono}")
@@ -99,7 +106,8 @@ def _capas_catalogo(params: dict, sid: str) -> list[str]:
 
 
 def prompt_de(escena: dict, unidades: dict, params: dict,
-              carta: dict | None = None, frase: str | None = None) -> str:
+              carta: dict | None = None, frase: str | None = None,
+              idioma: str = "") -> str:
     """El encargo de imagen de un plano, armado por capas.
 
     La misma cuenta usa la pantalla para ENSEÑAR el prompt antes de
@@ -107,6 +115,9 @@ def prompt_de(escena: dict, unidades: dict, params: dict,
 
     `frase` es la narración del PLANO (su momento de la escena): sin
     ella, todos los planos de una escena pedirían la misma imagen.
+
+    `idioma` solo añade una línea de dato («The language of this film
+    is Spanish.») pegada a la regla de la casa que la interpreta.
     """
     ficha = unidades.get(escena["id"]) or {}
     # EL HISTORIAL DE FEEDBACK MANDA SOBRE TODO: es lo que este plano ya
@@ -134,6 +145,21 @@ def prompt_de(escena: dict, unidades: dict, params: dict,
     bloque = guia_estilo.bloque_de_estilo(params)
     if bloque:
         piezas.append(f"Style: {bloque}" if "\n" not in bloque else bloque)
+    # LAS REGLAS DE LA CASA VAN CON LAS DEMÁS LEYES GENERALES, PEGADAS A
+    # LA GUÍA — y no al final del prompt, que es donde parecían naturales:
+    # ahí pesan más que el plano concreto y lo último que lee el generador
+    # acaba siendo la lista de leyes y no lo que se le encarga (fallo que
+    # cerró el original por esta vía). Adelantadas valen igual: son leyes.
+    bloque_reglas = reglas.bloque_prompt("prompt_imagen")
+    if bloque_reglas:
+        piezas.append(bloque_reglas)
+    # Y EN QUÉ IDIOMA. La POLÍTICA —lo que la producción escribe va en el
+    # idioma del vídeo, y los nombres propios no se traducen— la trae la
+    # regla `texto-dibujado-en-el-idioma-del-video` del bloque de arriba;
+    # aquí solo va el DATO, que es lo único que la regla no puede saber.
+    nombre = p2_brief.nombre_idioma_en(idioma)
+    if nombre:
+        piezas.append(f"The language of this film is {nombre}.")
     encuadre = " ".join(str((carta or {}).get("encuadre") or "").split())
     if encuadre:
         piezas.append(f"Shot type: {encuadre}")
@@ -408,6 +434,9 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
         raise imagen_glm.ErrorImagen(
             "falta la clave de GLM para imagenes (Configuracion -> claves)")
     pagadas = 0
+    # el idioma del vídeo, leído UNA vez: solo sirve para la línea de
+    # dato que acompaña a la regla del idioma en el prompt
+    idioma = str(proyecto.leer().get("idioma", "es"))
     for plano in planos:
         trabajo.comprobar_cancelacion()
         if cartelas_motor.sin_imagen(plano):
@@ -423,7 +452,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
                        "(una a una, cuesta dinero)")
         destino = carpeta / f"{plano['id']}.png"
         encargo = prompt_de(escena, unidades, params,
-                            carta=cartas.get(sid), frase=plano["narracion"])
+                            carta=cartas.get(sid), frase=plano["narracion"],
+                            idioma=idioma)
         imagen_glm.generar(
             encargo, destino, calidad=calidad, claves=claves, estilo="")
         anotar_operacion(
@@ -431,7 +461,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
             proveedor="glm", modelo="glm-image", calidad=calidad,
             contexto=f"assets:{plano['id']}", proyecto_dir=proyecto.raiz)
         plano["imagen"] = f"pasos/assets/imagenes/{plano['id']}.png"
-        plano["prompt"] = encargo[:300]
+        plano["prompt"] = encargo
 
     informe = (segmentar.informe(cortados, minimo, maximo, reparto=reparto)
                if cortados else None)

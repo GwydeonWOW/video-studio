@@ -40,7 +40,8 @@ from pathlib import Path
 
 from ..config import AJUSTES
 from ..nucleo.coste import anotar_operacion
-from . import comun, guia_estilo
+from . import comun, guia_estilo, p2_brief
+from ..motores import reglas
 
 PASO = "moodboard"
 PROPUESTAS = "_propuestas"
@@ -170,13 +171,19 @@ def version_de(ruta: Path) -> int:
         return 0
 
 
-def prompt_de_eje(eje: str, ficha_guia: dict, peticion: str = "") -> str:
+def prompt_de_eje(eje: str, ficha_guia: dict, peticion: str = "",
+                  idioma: str = "") -> str:
     """Lo que se le pide al generador para una lámina de estilo.
 
     Lleva la guía escrita ENTERA — es toda la verdad del estilo en este
     camino — y la corrección de quien mira, que manda sobre la
     descripción genérica: es lo que hace que «los brazos eran más
     delgados» sirva de algo.
+
+    Y el bloque de reglas de la casa, IGUAL QUE UN PLANO: en la primera
+    prueba del original este prompt se montó a mano sin ellas y los tres
+    cuerpos salieron SONRIENDO, con la regla que lo prohíbe escrita y
+    sin llegar. Eso no puede depender de que alguien se acuerde.
     """
     lineas = ["Produce one single full-frame image for a style reference "
               "sheet.",
@@ -191,12 +198,24 @@ def prompt_de_eje(eje: str, ficha_guia: dict, peticion: str = "") -> str:
     peticion = " ".join(str(peticion or "").split())
     if peticion:
         lineas.append(f"Correction, this takes priority: {peticion}")
+    bloque = reglas.bloque_prompt("prompt_imagen")
+    if bloque:
+        lineas.append(bloque)
+    # El idioma HACE FALTA AQUÍ más que en un plano: la lámina del eje
+    # «diagrama» viaja después como imagen de referencia dentro de cada
+    # plano con componente, así que si sale rotulada en el idioma
+    # equivocado ENSEÑA a rotular mal con un ejemplo dibujado. La
+    # política vive en la regla; aquí solo el dato.
+    nombre = p2_brief.nombre_idioma_en(idioma)
+    if nombre:
+        lineas.append(f"The language of this production is {nombre}.")
     lineas.append("No watermarks.")
     return " ".join(x for x in lineas if x)
 
 
 def generar(clave: str, ficha_guia: dict, ejes=None, peticiones=None,
-            calidad: str = "medium", avisar=None, proyecto_id: str = "") -> dict:
+            calidad: str = "medium", avisar=None, proyecto_id: str = "",
+            idioma: str = "") -> dict:
     """Dibuja las láminas que faltan y las deja PROPUESTAS.
 
     'ejes' None son todas; con una lista se rehacen sólo esas, que es lo
@@ -233,7 +252,8 @@ def generar(clave: str, ficha_guia: dict, ejes=None, peticiones=None,
            f"(calidad {calidad})")
     for numero, eje in enumerate(pedidos, start=1):
         destino = carpeta / f"{eje}.png"
-        prompt = prompt_de_eje(eje, ficha_guia, peticiones.get(eje))
+        prompt = prompt_de_eje(eje, ficha_guia, peticiones.get(eje),
+                               idioma=idioma)
         imagen_glm.generar(prompt, destino, calidad=calidad, claves=claves)
         anotar_operacion(
             datos_dir=AJUSTES.datos, proyecto=proyecto_id or "__estilo",
