@@ -18,3 +18,12 @@ export function segundos(s: number | null | undefined): string {
   const r = Math.round(s % 60)
   return m > 0 ? `${m}m ${r}s` : `${r}s`
 }
+
+/**
+ * La narración tal y como suena: sin las anotaciones de voz (<break/>),
+ * que el locutor calla pero en pantalla serían ruido. Es lo que se
+ * muestra siempre; el texto con etiquetas solo existe para el TTS.
+ */
+export function sinAnotaciones(texto: string | null | undefined): string {
+  return (texto ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+}

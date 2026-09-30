@@ -126,7 +126,12 @@ def hablar_con_marcas(narracion: str, voz: str, destino: Path,
     destino.parent.mkdir(parents=True, exist_ok=True)
     destino.write_bytes(mp3)
     duracion = marcas.get("audio_duration") or 0.0
-    palabras = _palabras_de(marcas, narracion)
+    # _generar ya rebana la alineacion por caracter en palabras (trozo a
+    # trozo, con su desplazamiento): esas son las marcas. (Llamar aqui a
+    # _palabras_de con este dict devolvia [] siempre: sin las columnas de
+    # alineacion cruda, la voz llegaba SIN marcas y todo lo que cuelga de
+    # ellas —planos por escena, subtitulos— se quedaba sin combustible.)
+    palabras = marcas.get("palabras") or []
     return {"ruta": destino, "duracion": round(duracion, 3), "palabras": palabras}
 
 
@@ -245,3 +250,201 @@ def personajes_de(claves: dict | None = None) -> int:
         return int(sub.get("character_count", 0))
     except (requests.RequestException, ValueError):
         return 0
+
+
+# ------------------------------------------------- toma continua (del original)
+#
+# Lo que sigue se porto de motores/voz_cartesia/voz.py: sintetizar el video
+# ENTERO en una toma y ensanchar despues los silencios entre escenas con
+# ruido de sala. Sintetizar escena a escena suena a robot leyendo una lista:
+# cada frase arranca en frio, sin memoria de la anterior, y en el montaje se
+# oyen los empalmes. Con una toma unica la entonacion fluye de una escena a
+# la siguiente y los cortes se deducen de las marcas de palabra, que son
+# exactas.
+
+SR = 44100
+
+#: Milisegundos de fundido al pegar el relleno. Sin esto, el salto de
+#: amplitud en el empalme suena como un chasquido, que es peor que el
+#: problema original.
+FUNDIDO_MS = 12
+
+
+def wav_de_pcm(pcm: bytes) -> bytes:
+    """Cabecera WAV PCM s16le mono sobre PCM crudo."""
+    import struct
+    cabecera = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+    cabecera += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, SR, SR * 2, 2, 16)
+    cabecera += b"data" + struct.pack("<I", len(pcm))
+    return cabecera + pcm
+
+
+def pcm_de_mp3(mp3: bytes, ffmpeg: str = "ffmpeg") -> bytes:
+    """Decodifica audio (mp3) a PCM s16le mono 44.1k para poder trocearlo.
+
+    El espaciado trabaja sobre PCM crudo: insertar bytes en mitad de un mp3
+    no es posible sin re-codificar. ffmpeg autodetecta el formato de
+    entrada, asi que tambien traga el wav que dejan algunas pruebas.
+    """
+    import subprocess
+    proceso = subprocess.run(
+        [ffmpeg, "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le",
+         "-ac", "1", "-ar", str(SR), "pipe:1"],
+        input=mp3, capture_output=True, timeout=600)
+    if proceso.returncode != 0 or not proceso.stdout:
+        raise ErrorVoz(f"decodificar audio: "
+                       f"{proceso.stderr.decode('utf-8', 'ignore')[-300:]}")
+    return proceso.stdout
+
+
+def _relleno_de_sala(pcm: bytes, desde_seg: float, hasta_seg: float,
+                     duracion: float) -> bytes:
+    """Ruido de sala para rellenar un hueco, sacado de la PROPIA pausa.
+
+    Antes se insertaban ceros. Una toma continua tiene su suelo de ruido, y
+    cortarlo a cero durante mas de un segundo se oye como un corte: el
+    fondo desaparece de golpe y vuelve. Con muchas escenas y un segundo de
+    hueco eran decenas de segundos de vacio digital, uno en cada frontera.
+
+    La mejor muestra de ruido de sala es la de la pausa que se esta
+    ensanchando, asi que se toma de ahi y se repite. Se alterna con su
+    reverso para que la repeticion no cree un patron audible.
+    """
+    bytes_por_seg = SR * 2
+    necesarios = int(duracion * bytes_por_seg) & ~1
+    if necesarios <= 0:
+        return b""
+    # semilla: el centro de la pausa natural, hasta 200 ms
+    ancho = max(0.0, hasta_seg - desde_seg)
+    if ancho < 0.04:
+        return b"\x00" * necesarios      # no hay pausa de la que sacar nada
+    toma = min(0.2, ancho * 0.8)
+    centro = (desde_seg + hasta_seg) / 2.0
+    ini = int((centro - toma / 2) * bytes_por_seg) & ~1
+    fin = (ini + (int(toma * bytes_por_seg) & ~1))
+    semilla = pcm[max(0, ini):min(len(pcm), fin)]
+    if len(semilla) < 4:
+        return b"\x00" * necesarios
+
+    reverso = semilla[::-1]
+    # el reverso de un buffer de bytes invierte tambien los dos bytes de
+    # cada muestra: se rehace por pares para que siga siendo audio y no
+    # ruido blanco
+    reverso = b"".join(reverso[i:i + 2][::-1]
+                       for i in range(0, len(reverso) - 1, 2))
+    trozos, largo, vuelta = [], 0, 0
+    while largo < necesarios:
+        pieza = semilla if vuelta % 2 == 0 else reverso
+        trozos.append(pieza)
+        largo += len(pieza)
+        vuelta += 1
+    relleno = bytearray(b"".join(trozos)[:necesarios])
+
+    # fundido de entrada y de salida sobre el relleno
+    muestras = FUNDIDO_MS * SR // 1000
+    for i in range(min(muestras, len(relleno) // 2)):
+        factor = i / muestras
+        for pos in (i * 2, len(relleno) - 2 - i * 2):
+            valor = int.from_bytes(relleno[pos:pos + 2], "little", signed=True)
+            relleno[pos:pos + 2] = int(
+                valor * factor).to_bytes(2, "little", signed=True)
+    return bytes(relleno)
+
+
+def espaciar(pcm: bytes, reparto: dict, hueco_minimo: float = 1.0,
+             orden: list | None = None) -> tuple[bytes, list]:
+    """Ensancha los silencios ENTRE escenas sin re-sintetizar nada.
+
+    Una lectura continua encadena las frases con pausas cortas. Trocear la
+    sintesis lo arreglaria pero devolveria el problema de origen: cada
+    frase arrancando en frio. Aqui se conserva la toma tal cual y solo se
+    estira el silencio en los cortes, asi que la prosodia queda intacta.
+
+    `reparto` es {escena_id: [palabra, ...]} con marcas en el reloj de la
+    TOMA; `orden` (por defecto, el de insercion) dice que escena va antes.
+
+    Devuelve (pcm_nuevo, desplazamientos): el retardo acumulado a aplicar
+    a cada marca segun el instante en que caiga.
+    """
+    bytes_por_seg = SR * 2
+    ids = list(orden) if orden is not None else list(reparto)
+    con_voz = [sid for sid in ids if reparto.get(sid)]
+
+    # Cortes: (instante original, silencio a insertar, pausa natural)
+    cortes = []
+    for anterior, siguiente in zip(con_voz, con_voz[1:]):
+        fin = reparto[anterior][-1]["fin"]
+        inicio = reparto[siguiente][0]["inicio"]
+        falta = hueco_minimo - (inicio - fin)
+        if falta > 0.01:
+            cortes.append((fin + (inicio - fin) / 2, falta, fin, inicio))
+
+    if not cortes:
+        return pcm, []
+
+    trozos, anterior_byte, acumulado = [], 0, 0.0
+    desplazamientos = []
+    for instante, silencio, desde, hasta in cortes:
+        corte_byte = int(instante * bytes_por_seg) & ~1   # alineado a muestra
+        trozos.append(pcm[anterior_byte:corte_byte])
+        trozos.append(_relleno_de_sala(pcm, desde, hasta, silencio))
+        anterior_byte = corte_byte
+        acumulado += silencio
+        desplazamientos.append(
+            {"desde": instante, "retardo": round(acumulado, 3)})
+    trozos.append(pcm[anterior_byte:])
+
+    return b"".join(trozos), desplazamientos
+
+
+def aplicar_desplazamiento(instante: float, desplazamientos: list) -> float:
+    """El instante con el retardo acumulado que le toca."""
+    retardo = 0.0
+    for d in desplazamientos:
+        if instante >= d["desde"]:
+            retardo = d["retardo"]
+    return round(instante + retardo, 3)
+
+
+def _normalizar(palabra: str) -> str:
+    import re as _re
+    return _re.sub(r"[^\wáéíóúüñ]", "", palabra.lower())
+
+
+def repartir_palabras(escenas: list, palabras: list) -> dict:
+    """Asigna a cada escena el tramo de marcas que le corresponde.
+
+    Se recorre la lista devuelta por el motor en orden y se van consumiendo
+    las palabras de cada escena (la narracion LIMPIA, sin etiquetas). Se
+    compara normalizado porque el modelo puede devolver la puntuacion
+    pegada o separada, y un desajuste de un token desplazaria todos los
+    cortes siguientes. Ventana de tolerancia de 3 por si parte o une.
+    """
+    reparto: dict[str, list] = {}
+    i = 0
+    for escena in escenas:
+        esperadas = [_normalizar(p) for p in
+                     str(escena.get("narracion") or "").split()]
+        esperadas = [p for p in esperadas if p]
+        tramo = []
+        for esperada in esperadas:
+            j = i
+            while j < min(i + 3, len(palabras)):
+                if _normalizar(palabras[j]["palabra"]) == esperada:
+                    break
+                j += 1
+            if j < min(i + 3, len(palabras)):
+                tramo.extend(palabras[i:j + 1])
+                i = j + 1
+            elif i < len(palabras):
+                tramo.append(palabras[i])
+                i += 1
+        reparto[escena.get("id") or ""] = tramo
+    # Lo que sobre se cuelga de la ultima escena con texto
+    if i < len(palabras) and reparto:
+        con_texto = [e.get("id") for e in escenas
+                     if str(e.get("narracion") or "").strip()]
+        if con_texto:
+            reparto[con_texto[-1]].extend(palabras[i:])
+    return reparto
+

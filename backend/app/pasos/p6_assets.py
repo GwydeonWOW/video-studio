@@ -41,7 +41,7 @@ from __future__ import annotations
 from ..config import AJUSTES
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief, catalogo_visual, encuadres, guia_estilo
+from . import comun, marcas_tts, p2_brief, catalogo_visual, encuadres, guia_estilo
 from ..motores import imagen_glm
 from ..motores.guion import segmentar
 
@@ -144,7 +144,9 @@ def prompt_de(escena: dict, unidades: dict, params: dict,
         capa = f"{visual}. {frase.strip()}".strip() if visual else frase.strip()
         piezas.append(capa)
     else:
-        texto = visual or str(escena.get("narracion", "")).strip()
+        # limpiar: la narracion puede traer anotaciones de voz (<break>)
+        # y una etiqueta en el prompt de imagen es ruido que ademas paga
+        texto = visual or marcas_tts.limpiar(escena.get("narracion", ""))
         if texto:
             piezas.append(texto)
     return "\n".join(piezas + correcciones) or "abstract neutral illustration"
@@ -257,7 +259,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
                            "zoom": zoom, "transicion": ranura,
                            **({"cartela": cartela, "imagen": None,
                                "prompt": "(cartela)"} if cartela else {}),
-                           "narracion": str(escena.get("narracion", ""))})
+                           "narracion": marcas_tts.limpiar(
+                               escena.get("narracion", ""))})
             indice += 1
             continue
         trozos = _cortar(palabras, duracion, previos_de.get(sid) or [],

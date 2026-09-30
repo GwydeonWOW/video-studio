@@ -1,8 +1,25 @@
-"""Paso 4 — voz: narración con ElevenLabs, escena a escena.
+"""Paso 4 — voz: UNA toma continua para todo el vídeo (ElevenLabs).
 
-Por escena: TTS con marcas de tiempo (alineación por palabra) -> mp3 +
-duración real. La duración real sustituye a la estimada del guion: el
-vídeo se mide con lo que se oyó, no con lo que se pensó.
+Sintetizar escena a escena suena a robot leyendo una lista: cada frase
+arranca en frío, sin memoria de la anterior, y en el montaje se oyen los
+empalmes. Con una toma única la entonación fluye de una escena a la
+siguiente, y los cortes se deducen después de las marcas de palabra, que
+son exactas. El aire entre escenas se consigue ensanchando el silencio de
+la pista ya grabada con RUIDO DE SALA de la propia pausa
+(voz_elevenlabs.espaciar), nunca troceando la síntesis.
+
+Después la toma se corta por escenas (por la mitad del hueco entre la
+última palabra de una y la primera de la siguiente): cada escena conserva
+su ficha de siempre —audio propio + marcas en su reloj— así que repaso,
+planos, subtítulos y render no se enteran de que debajo hay una sola toma.
+
+Las anotaciones de voz del guion (`<break .../>`, ver marcas_tts) viajan
+en el texto y ElevenLabs las convierte en silencio de verdad: aportan la
+prosodia que un silencio pegado después no puede aportar.
+
+`modo: "por_escena"` mantiene el comportamiento antiguo (una llamada por
+escena), y las regrabaciones del repaso siempre van por escena: regrabar
+el vídeo entero para cambiar una escena es pagar el doble.
 
 Coste: caracteres consumidos, apuntados al generar (medidor).
 """
@@ -14,14 +31,16 @@ from ..config import AJUSTES
 from ..motores import llm
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief
+from . import comun, marcas_tts, p2_brief
 from ..motores import voz_elevenlabs
 
 
 def params_defecto() -> dict:
     # voz por defecto de Eleven Labs (Rachel); la pantalla lista las demas.
+    # hueco_minimo: aire garantizado ENTRE escenas en la toma continua.
     return {"voz": "21m00Tcm4TlvDq8ikWAM", "modelo": "multilingual",
-            "estabilidad": 0.5, "similitud": 0.75, "velocidad": 1.0}
+            "estabilidad": 0.5, "similitud": 0.75, "velocidad": 1.0,
+            "modo": "continua", "hueco_minimo": 1.0}
 
 
 def estimar(params: dict) -> dict:
@@ -46,10 +65,15 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
             "falta la clave de ElevenLabs (Configuracion -> claves)")
     carpeta = proyecto.carpeta_paso("voz") / "audio"
     carpeta.mkdir(parents=True, exist_ok=True)
+    if (str(params.get("modo") or "continua") == "continua"
+            and not solo_escenas and len(escenas) > 1):
+        return _voz_continua(proyecto, params, escenas, claves, carpeta,
+                             trabajo)
     salida, total = [], 0.0
     for indice, escena in enumerate(escenas, start=1):
         trabajo.comprobar_cancelacion()
-        narracion = escena["narracion"]
+        # las anotaciones del guion viajan con el texto; el motor las calla
+        narracion = marcas_tts.para_tts(marcas_tts.sanear(escena["narracion"]))
         trabajo.avance(f"voz {indice}/{len(escenas)}: {escena['id']}")
         destino = carpeta / f"{escena['id']}.mp3"
         marca = voz_elevenlabs.hablar_con_marcas(
@@ -72,6 +96,110 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     return {"escenas": salida, "duracion": round(total, 3)}
 
 
+# ------------------------------------------------------------- toma continua
+
+def _voz_continua(proyecto: Proyecto, params: dict, escenas: list,
+                  claves: dict, carpeta, trabajo) -> dict:
+    """TODO el vídeo en una toma, cortado después por escenas.
+
+    La toma se graba entera (prosodia continua), se ensancha el aire entre
+    escenas con ruido de sala (`espaciar`, sin re-sintetizar) y se corta
+    por la mitad de cada hueco: cada escena sale con su audio propio y sus
+    marcas en SU reloj, que es el contrato que ya consumen el repaso, los
+    planos, los subtítulos y el render.
+    """
+    sr2 = voz_elevenlabs.SR * 2
+    textos = [t for t in (marcas_tts.para_tts(
+        marcas_tts.sanear(e.get("narracion"))) for e in escenas) if t]
+    transcript = " ".join(textos)
+    if not transcript:
+        raise ValueError("el guion no tiene narracion que locutar")
+    trabajo.avance(f"toma única: {len(escenas)} escenas, "
+                   f"{len(transcript)} caracteres")
+    destino = carpeta / "_toma.mp3"
+    marca = voz_elevenlabs.hablar_con_marcas(
+        transcript, params.get("voz", params_defecto()["voz"]), destino,
+        claves=claves, modelo=params.get("modelo", "multilingual"),
+        estabilidad=float(params.get("estabilidad", 0.5)),
+        similitud=float(params.get("similitud", 0.75)),
+        velocidad=float(params.get("velocidad", 1.0)))
+    # defensa: si alguna marca llegara con restos de etiqueta, no es una
+    # palabra y el reparto la estaría esperando en vano
+    palabras = [p for p in marca["palabras"]
+                if not marcas_tts.es_token_de_etiqueta(p["palabra"])]
+    # el reparto empareja lo que el guion DICE (limpio) con lo que el motor
+    # devolvió, con tolerancia por si parte o une tokens
+    limpias = [{"id": e["id"],
+                "narracion": marcas_tts.limpiar(e.get("narracion"))}
+               for e in escenas]
+    reparto = voz_elevenlabs.repartir_palabras(limpias, palabras)
+    pcm = voz_elevenlabs.pcm_de_mp3(destino.read_bytes())
+
+    hueco = max(0.0, float(params.get("hueco_minimo", 1.0)))
+    if hueco > 0 and len(escenas) > 1:
+        pcm, desplazamientos = voz_elevenlabs.espaciar(pcm, reparto, hueco)
+        if desplazamientos:
+            for tramo in reparto.values():
+                for p in tramo:
+                    p["inicio"] = voz_elevenlabs.aplicar_desplazamiento(
+                        p["inicio"], desplazamientos)
+                    p["fin"] = voz_elevenlabs.aplicar_desplazamiento(
+                        p["fin"], desplazamientos)
+            trabajo.avance(
+                f"aire entre escenas: {len(desplazamientos)} corte(s), "
+                f"+{desplazamientos[-1]['retardo']:.2f} s de ruido de sala")
+
+    total = len(pcm) / sr2
+    ids = [e["id"] for e in escenas]
+    starts, ends = {ids[0]: 0.0}, {ids[-1]: total}
+    con_voz = [sid for sid in ids if reparto.get(sid)]
+    for anterior, siguiente in zip(con_voz, con_voz[1:]):
+        fin = reparto[anterior][-1]["fin"]
+        arranque = reparto[siguiente][0]["inicio"]
+        corte = fin + (arranque - fin) / 2
+        ends[anterior] = corte
+        starts[siguiente] = corte
+    # una escena sin reparto propio hereda el corte del vecino
+    for k in range(len(ids) - 1, -1, -1):
+        if ids[k] not in ends:
+            posterior = next((starts[ids[j]] for j in range(k + 1, len(ids))
+                              if ids[j] in starts), total)
+            ends[ids[k]] = posterior
+    for k, sid in enumerate(ids):
+        if sid not in starts:
+            previo = next((ends[ids[j]] for j in range(k - 1, -1, -1)
+                           if ids[j] in ends), 0.0)
+            starts[sid] = previo
+
+    salida, total_fichas = [], 0.0
+    for escena in escenas:
+        trabajo.comprobar_cancelacion()
+        sid = escena["id"]
+        t0 = starts[sid]
+        t1 = min(total, max(ends[sid], t0 + 0.05))
+        trozo = pcm[int(t0 * sr2) & ~1:int(t1 * sr2) & ~1]
+        fichero = carpeta / f"{sid}.wav"
+        fichero.write_bytes(voz_elevenlabs.wav_de_pcm(trozo))
+        duracion = round(len(trozo) / sr2, 3)
+        propias = [{"palabra": p["palabra"],
+                    "inicio": round(max(0.0, p["inicio"] - t0), 3),
+                    "fin": round(max(0.0, p["fin"] - t0), 3)}
+                   for p in reparto.get(sid, [])]
+        salida.append({"id": sid, "audio": f"pasos/voz/audio/{sid}.wav",
+                       "duracion": duracion, "palabras": propias})
+        total_fichas += duracion
+        trabajo.avance(f"{sid}: {duracion:g} s de la toma")
+    anotar_operacion(
+        datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="voz",
+        proveedor="elevenlabs", modelo=params.get("modelo", "multilingual"),
+        caracteres=len(transcript), contexto="voz:toma_continua",
+        proyecto_dir=proyecto.raiz)
+    trabajo.avance(f"toma completa: {len(salida)} escenas, "
+                   f"{round(total_fichas)} s")
+    return {"escenas": salida, "duracion": round(total_fichas, 3),
+            "modo": "continua"}
+
+
 def regrabar_escena(proyecto: Proyecto, escena_id: str, params: dict) -> dict:
     """Regraba UNA escena (boton de la pantalla de repaso). -> ficha nueva"""
     guion = p2_brief.proyecto_leer_datos(proyecto, "guion")
@@ -81,8 +209,9 @@ def regrabar_escena(proyecto: Proyecto, escena_id: str, params: dict) -> dict:
         raise ValueError(f"escena inexistente: {escena_id}")
     claves = comun.claves_actuales()
     destino = proyecto.carpeta_paso("voz") / "audio" / f"{escena_id}.mp3"
+    narracion = marcas_tts.para_tts(marcas_tts.sanear(escena["narracion"]))
     marca = voz_elevenlabs.hablar_con_marcas(
-        escena["narracion"], params.get("voz", params_defecto()["voz"]),
+        narracion, params.get("voz", params_defecto()["voz"]),
         destino, claves=claves, modelo=params.get("modelo", "multilingual"),
         estabilidad=float(params.get("estabilidad", 0.5)),
         similitud=float(params.get("similitud", 0.75)),
@@ -91,7 +220,7 @@ def regrabar_escena(proyecto: Proyecto, escena_id: str, params: dict) -> dict:
     anotar_operacion(
         datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="voz",
         proveedor="elevenlabs", modelo=params.get("modelo", "multilingual"),
-        caracteres=len(escena["narracion"]), contexto=f"voz:{escena_id}",
+        caracteres=len(narracion), contexto=f"voz:{escena_id}",
         proyecto_dir=proyecto.raiz)
     ficha = {"id": escena_id, "audio": f"pasos/voz/audio/{escena_id}.mp3",
              "duracion": duracion, "palabras": marca["palabras"]}
@@ -152,6 +281,8 @@ def previsualizar(proyecto: Proyecto, params: dict, segundos: float = 20.0) -> d
     """
     idioma = str(proyecto.leer().get("idioma", "es"))
     texto = _texto_de_muestra(proyecto, idioma, segundos)
+    # si la muestra sale del guion puede traer anotaciones: se locutan
+    texto = marcas_tts.para_tts(marcas_tts.sanear(texto))
     destino = proyecto.carpeta_paso("voz") / "previsualizacion.mp3"
     voz_elevenlabs.hablar(
         texto, params.get("voz", params_defecto()["voz"]), destino,

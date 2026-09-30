@@ -3,7 +3,7 @@ import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { AudioLines, BadgeCheck, Check, Film, Loader2, Palette, PenLine, Play, RefreshCw } from "lucide-react"
 import { api } from "../../lib/api"
-import { segundos } from "../../lib/utils"
+import { segundos, sinAnotaciones } from "../../lib/utils"
 import { usarTrabajo } from "../../lib/trabajos"
 import type {
   DatosAssets,
@@ -309,7 +309,9 @@ export function PanelGuion({
                 seguirTrabajo={seguirTrabajo}
               />
             </div>
-            <p className="whitespace-pre-wrap text-sm">{escena.narracion}</p>
+            <p className="whitespace-pre-wrap text-sm">
+              {sinAnotaciones(escena.narracion)}
+            </p>
             {escena.visual && (
               <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
                 <span className="font-medium text-foreground">Visual:</span>{" "}

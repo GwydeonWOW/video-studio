@@ -5,7 +5,7 @@ import { toast } from "sonner"
 import { ArrowLeft, BookOpen, Camera, ChevronLeft, ChevronRight, ClipboardCopy, ClipboardList, Eye, Loader2, MessageSquareHeart, Palette, Pause, Play, Settings2, Wallet, Zap } from "lucide-react"
 import { api } from "../lib/api"
 import { apuntarPantalla } from "../lib/pantalla"
-import { dolares, segundos } from "../lib/utils"
+import { dolares, segundos, sinAnotaciones } from "../lib/utils"
 import {
   NOMBRES_PASOS,
   ORDEN_PASOS,
@@ -1560,7 +1560,9 @@ function DialogoVisor({
               ))}
             </div>
 
-            <p className="text-sm text-muted-foreground">{escena.narracion}</p>
+            <p className="text-sm text-muted-foreground">
+              {sinAnotaciones(escena.narracion)}
+            </p>
           </div>
         )}
 

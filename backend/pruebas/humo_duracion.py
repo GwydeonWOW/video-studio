@@ -62,7 +62,8 @@ cliente.post("/api/auth/instalar", json={"contrasena": "una-clave-larga"})
 # ------------------------------------------------------ la aritmética pura
 
 check("params por defecto del guion: duración, no escenas",
-      p3_guion.params_defecto() == {"duracion_min": 10},
+      p3_guion.params_defecto()["duracion_min"] == 10
+      and "escenas" not in p3_guion.params_defecto(),
       str(p3_guion.params_defecto()))
 
 h = p3_guion._horquilla(40, {"min": 20, "max": 40})

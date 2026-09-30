@@ -41,7 +41,7 @@ invalida las demás aguas abajo — la réplica marca por unidades.
 from __future__ import annotations
 
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief
+from . import comun, marcas_tts, p2_brief
 from ..motores import llm
 
 SISTEMA = """Eres un guionista de vídeos narrados en español, estilo
@@ -55,6 +55,9 @@ Reglas:
   con sujeto, acción, ambiente y luz. Sin texto en la imagen.
 - "texto_pantalla": rótulo de 2 a 5 palabras para reforzar la idea.
 - "duracion_estimada": segundos que durará narrar esa escena (número).
+- "abre_seccion": true SOLO en la escena que abre una sección del
+  relato (un capítulo, un cambio grande de tema). Es estructura, no
+  estilo: marca dónde tiene que haber aire al escuchar.
 - CUÁNTAS escenas y CUÁNTO dura cada una los manda la sección
   LONGITUD del encargo; el conjunto cuenta una historia con arco.
 Responde SOLO JSON: {"escenas": [{"id": "S001", ...}, ...]}"""
@@ -71,7 +74,13 @@ TOKENS_POR_PALABRA = 2.5
 
 
 def params_defecto() -> dict:
-    return {"duracion_min": 10}
+    # anotaciones_voz: el redactor puede meter <break> en la narracion
+    # (ver marcas_tts). pausa_gancho_ms / pausa_seccion_ms: aire
+    # ESTRUCTURAL que no depende de que el redactor se acuerde — lo pone
+    # el motor en el texto (gancho: final de la primera escena; seccion:
+    # delante de cada escena que abre seccion). 0 lo apaga.
+    return {"duracion_min": 10, "anotaciones_voz": True,
+            "pausa_gancho_ms": 900, "pausa_seccion_ms": 900}
 
 
 def estimar(params: dict) -> dict:
@@ -134,7 +143,9 @@ def _seccion_longitud(h: dict) -> str:
 
 
 def _palabras_de(salida: list[dict]) -> int:
-    return sum(comun.palabras(e["narracion"]) for e in salida)
+    # contar_palabras y no palabras a secas: las anotaciones de voz no se
+    # locutan y la horquilla se mide sobre lo que se OYE
+    return sum(marcas_tts.contar_palabras(e["narracion"]) for e in salida)
 
 
 def _a_salida(respuesta, override: dict) -> list[dict]:
@@ -151,6 +162,12 @@ def _a_salida(respuesta, override: dict) -> list[dict]:
         manual = " ".join(str(override.get(sid, {}).get("texto") or "").split())
         if manual:
             narracion = manual
+        # sanear deja solo <break> del vocabulario: lo que el motor no
+        # reconoce lo LOCUTA en voz alta. Y una escena que solo trae
+        # etiquetas no es una escena (no se locuta nada)
+        narracion = marcas_tts.sanear(narracion)
+        if not marcas_tts.limpiar(narracion):
+            continue
         salida.append({
             "id": sid,
             "titulo": comun.normalizar_texto(escena.get("titulo", ""))[:120],
@@ -158,9 +175,43 @@ def _a_salida(respuesta, override: dict) -> list[dict]:
             "visual": comun.normalizar_texto(escena.get("visual", ""))[:600],
             "texto_pantalla": comun.normalizar_texto(
                 escena.get("texto_pantalla", ""))[:60],
-            "duracion_estimada": comun.duracion_estimada(narracion),
+            "abre_seccion": bool(escena.get("abre_seccion")),
+            "duracion_estimada": comun.duracion_estimada(
+                marcas_tts.limpiar(narracion)),
         })
     return salida
+
+
+def _pausas_estructurales(escenas: list[dict], params: dict) -> None:
+    """El aire que no puede depender de que el redactor se acuerde.
+
+    `pausa_gancho_ms` detras de la primera escena (el gancho remata y se
+    queda colgando: sin aire, la entrada le pisa el final) y
+    `pausa_seccion_ms` delante de cada escena que abre seccion — que se
+    pone al FINAL de la anterior, porque el TTS solo sabe callar entre
+    trozos de texto. La primera escena no lleva pausa de seccion aunque
+    abra: ya lleva la del gancho. 0 apaga cada una.
+    """
+    params = params or {}
+
+    def _soplar(escena: dict, ms: float) -> None:
+        escena["narracion"] = marcas_tts.pausa_al_final(
+            escena["narracion"], ms)
+        escena["duracion_estimada"] = round(
+            comun.duracion_estimada(marcas_tts.limpiar(escena["narracion"]))
+            + marcas_tts.silencio_final(escena["narracion"]) / 1000.0, 2)
+
+    try:
+        gancho = float(params.get("pausa_gancho_ms") or 0)
+        seccion = float(params.get("pausa_seccion_ms") or 0)
+    except (TypeError, ValueError):
+        gancho, seccion = 0.0, 0.0
+    if gancho > 0 and escenas:
+        _soplar(escenas[0], gancho)
+    if seccion > 0:
+        for indice in range(1, len(escenas)):
+            if escenas[indice].get("abre_seccion"):
+                _soplar(escenas[indice - 1], seccion)
 
 
 def _corregir_horquilla(salida: list[dict], h: dict, llamadas, override: dict,
@@ -184,7 +235,7 @@ def _corregir_horquilla(salida: list[dict], h: dict, llamadas, override: dict,
                  f"{h['max']}: recorta frases enteras que no aporten un "
                  "hecho nuevo, sin perder ningún hecho")
     listado = "\n".join(
-        f"{e['id']} ({comun.palabras(e['narracion'])} pal.): "
+        f"{e['id']} ({marcas_tts.contar_palabras(e['narracion'])} pal.): "
         f"{e['narracion'][:180]}" for e in salida)
     trabajo.avance(f"rehaciendo el largo: {orden[:70]}")
     original = llamadas.instruccion
@@ -226,6 +277,11 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     if linea:
         partes.append(linea)
     partes.append(f"MATERIAL (respaldo):\n{ingesta.get('texto', '')[:40000]}")
+    if (params or {}).get("anotaciones_voz", True):
+        # el vocabulario de anotaciones viaja con el encargo: sin el, el
+        # redactor no sabe que existe; con el, no se inventa etiquetas
+        # (que el motor LOCUTA en voz alta)
+        partes.append(marcas_tts.instrucciones())
     if h:
         partes.append(_seccion_longitud(h))
         # el techo crece con el vídeo: 40 min son ~6.200 palabras y el
@@ -259,6 +315,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     # ids unicos y correlativos
     for indice, escena in enumerate(salida, start=1):
         escena["id"] = f"S{indice:03d}"
+    _pausas_estructurales(salida, params)
     total = sum(e["duracion_estimada"] for e in salida)
     salida_datos = {"escenas": salida, "duracion_estimada": round(total, 2)}
     if h:
@@ -299,8 +356,16 @@ def reescribir_escena(proyecto: Proyecto, escena_id: str, orden: str,
     nueva = llm.llamar_json(llamada, claves=comun.claves_actuales())
     if not isinstance(nueva, dict) or not nueva.get("narracion"):
         raise llm.ErrorLLM("la reescritura no trajo narracion")
+    # mismo trato que la generacion entera: solo etiquetas del
+    # vocabulario (lo demas lo LOCUTA el motor). Y se conserva la marca
+    # estructural de la escena, que el prompt de correccion no le ensena
+    nueva["narracion"] = marcas_tts.sanear(nueva["narracion"])
+    if not nueva["narracion"]:
+        raise llm.ErrorLLM("la reescritura no trajo narracion")
     nueva["id"] = escena_id
-    nueva["duracion_estimada"] = comun.duracion_estimada(nueva["narracion"])
+    nueva["abre_seccion"] = bool(actual.get("abre_seccion"))
+    nueva["duracion_estimada"] = comun.duracion_estimada(
+        marcas_tts.limpiar(nueva["narracion"]))
     return nueva
 
 
