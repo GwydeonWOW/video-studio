@@ -41,7 +41,7 @@ invalida las demás aguas abajo — la réplica marca por unidades.
 from __future__ import annotations
 
 from ..nucleo.proyecto import Proyecto
-from . import comun, marcas_tts, p2_brief
+from . import comun, cta, marcas_tts, p2_brief
 from ..motores import llm
 
 SISTEMA = """Eres un guionista de vídeos narrados en español, estilo
@@ -79,8 +79,13 @@ def params_defecto() -> dict:
     # ESTRUCTURAL que no depende de que el redactor se acuerde — lo pone
     # el motor en el texto (gancho: final de la primera escena; seccion:
     # delante de cada escena que abre seccion). 0 lo apaga.
+    # LA PRESENTACIÓN Y LAS LLAMADAS A LA ACCIÓN (ver cta.py): tres
+    # momentos, cada uno con lo que se quiere que diga. Son params del
+    # guion porque el texto que redacta el modelo depende de ellos, y
+    # son del VÍDEO: no viajan en el estilo del canal.
     return {"duracion_min": 10, "anotaciones_voz": True,
-            "pausa_gancho_ms": 900, "pausa_seccion_ms": 900}
+            "pausa_gancho_ms": 900, "pausa_seccion_ms": 900,
+            **cta.PARAMS_POR_DEFECTO}
 
 
 def estimar(params: dict) -> dict:
@@ -277,6 +282,13 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     if linea:
         partes.append(linea)
     partes.append(f"MATERIAL (respaldo):\n{ingesta.get('texto', '')[:40000]}")
+    # LA PRESENTACIÓN Y LAS LLAMADAS A LA ACCIÓN, detrás del material:
+    # van ANTES de redactar y no cosidas después, para que la escena
+    # anterior a cada una pueda prepararla (ver cta.bloque_para_guion)
+    opciones = cta._normalizar(params or {}, estricto=False)
+    seccion_cta = cta.bloque_para_guion(opciones.get("cta"))
+    if seccion_cta:
+        partes.append(seccion_cta)
     if (params or {}).get("anotaciones_voz", True):
         # el vocabulario de anotaciones viaja con el encargo: sin el, el
         # redactor no sabe que existe; con el, no se inventa etiquetas

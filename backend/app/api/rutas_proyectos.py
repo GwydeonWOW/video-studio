@@ -31,10 +31,10 @@ from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
                                leer_json, leer_jsonl, lock_de,
                                ruta_contenida)
 from ..nucleo.trabajos import TrabajoCancelado
-from ..pasos import (cartelas, catalogo_visual, comun, conservar, direccion,
-                     encuadres, guia_estilo, moodboard, p2_brief, p3_guion,
-                     p4_voz, p6_assets, redactor, registro, repaso, sonido,
-                     transiciones)
+from ..pasos import (cartelas, catalogo_visual, comun, conservar, cta,
+                     direccion, encuadres, guia_estilo, moodboard, p2_brief,
+                     p3_guion, p4_voz, p6_assets, redactor, registro, repaso,
+                     sonido, transiciones)
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
@@ -677,6 +677,15 @@ def guardar_params(pid: str, paso: str, cuerpo: dict) -> dict:
     estado = Estado(proyecto)
     if not isinstance(cuerpo, dict) or not cuerpo:
         raise HTTPException(400, "se esperaba un objeto de params")
+    # la caja de las llamadas a la acción es anidada y tiene sus propias
+    # reglas (qué momentos existen, cuánto puede ocupar lo que se pide):
+    # se valida aquí porque un params.cta malforme guardado en silencio
+    # es un guion que no sale y un aviso que no llega a nadie
+    if paso == "guion" and "cta" in cuerpo:
+        try:
+            cta.normalizar(cuerpo["cta"], estricto=True)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     with lock_de(pid):
         estado.guardar_params(paso, cuerpo)
         datos = proyecto.leer()

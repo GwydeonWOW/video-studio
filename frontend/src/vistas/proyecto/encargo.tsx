@@ -44,6 +44,95 @@ interface PropsEncargo {
 
 const RETARDO_MS = 800
 
+/* ------------------------------------------------ las llamadas a la acción */
+
+interface RanuraCta {
+  puesto: boolean
+  texto: string
+}
+
+interface MomentoCta {
+  id: "presentacion" | "cta_medio" | "cta_final"
+  nombre: string
+  pista: string
+  etiqueta: string
+  ejemplo: string
+  ayuda?: string
+}
+
+const MOMENTOS_CTA: MomentoCta[] = [
+  {
+    id: "presentacion",
+    nombre: "Se presenta justo después de la intro",
+    pista: "en la primera escena después del gancho, nunca en el gancho",
+    etiqueta: "Cómo quieres que se presente",
+    ejemplo:
+      "di quién soy y que en este vídeo se va a ver cómo se hace esto; " +
+      "si les gusta, que le den al like, y empezamos",
+    ayuda:
+      "Es el patrón, no el texto: el guion lo reescribe con lo que se " +
+      "enseñe en cada vídeo. Sencillo —quién eres y qué se va a ver—, sin " +
+      "currículum ni «emprendedor y creador de contenido».",
+  },
+  {
+    id: "cta_medio",
+    nombre: "Llamada a la acción a mitad del vídeo",
+    pista: "en el corte entre dos secciones, después de haber contado algo",
+    etiqueta: "Qué quieres que pida",
+    ejemplo: "que entre en mi web, donde tiene más información sobre esto",
+  },
+  {
+    id: "cta_final",
+    nombre: "Llamada a la acción al final",
+    pista: "en la última escena, como despedida",
+    etiqueta: "Qué quieres que pida",
+    ejemplo:
+      "que le dé a like y se suscriba, y que vea el vídeo de la semana " +
+      "pasada sobre lo mismo",
+  },
+]
+
+/** LAS TRES VIENEN APAGADAS: un vídeo no se presenta ni pide nada
+ *  mientras nadie lo marque. Lo que no hay guardado cuenta como
+ *  apagado (proyectos viejos), y así el prompt sale igual. */
+function ctaPorDefecto(): Record<MomentoCta["id"], RanuraCta> {
+  return {
+    presentacion: { puesto: false, texto: "" },
+    cta_medio: { puesto: false, texto: "" },
+    cta_final: { puesto: false, texto: "" },
+  }
+}
+
+/** La caja del servidor, con lo que falte relleno en apagado. */
+function ctaDelServidor(guion: Record<string, unknown>) {
+  const base = ctaPorDefecto()
+  const crudo = guion.cta
+  if (crudo && typeof crudo === "object") {
+    for (const m of MOMENTOS_CTA) {
+      const r = (crudo as Record<string, unknown>)[m.id]
+      if (r && typeof r === "object") {
+        const ranura = r as Record<string, unknown>
+        base[m.id] = {
+          puesto: ranura.puesto === true,
+          texto: String(ranura.texto ?? ""),
+        }
+      }
+    }
+  }
+  return base
+}
+
+function ctaDifiere(
+  local: Record<MomentoCta["id"], RanuraCta>,
+  servidor: Record<MomentoCta["id"], RanuraCta>
+) {
+  return MOMENTOS_CTA.some(
+    (m) =>
+      local[m.id].puesto !== servidor[m.id].puesto ||
+      local[m.id].texto.trim() !== servidor[m.id].texto.trim()
+  )
+}
+
 export function PanelEncargo({
   pid,
   ocupado,
@@ -59,6 +148,7 @@ export function PanelEncargo({
     tono: String(params.brief.tono ?? ""),
     duracion: String(params.guion.duracion_min ?? 10),
   }))
+  const [cta, setCta] = useState(() => ctaDelServidor(params.guion))
   // lo que hay en el servidor: la base sobre la que se fusiona cada
   // guardado (PUT reemplaza, no fusiona)
   const guardados = useRef<ParamsEncargo>({ ...params })
@@ -67,10 +157,15 @@ export function PanelEncargo({
   const cambiar = (clave: keyof typeof campos, valor: string) =>
     setCampos((c) => ({ ...c, [clave]: valor }))
 
+  const cambiarCta = (id: MomentoCta["id"], parche: Partial<RanuraCta>) =>
+    setCta((prev) => ({ ...prev, [id]: { ...prev[id], ...parche } }))
+
   useEffect(() => {
     // el diccionario ENTERO que se mandaría de este paso: lo guardado
     // con solo las teclas cambiadas (sin tocar la base hasta que el
     // PUT salga bien, o un fallo parecería guardado y no se reintentaría)
+    const ctaServidor = ctaDelServidor(guardados.current.guion)
+    const ctaCambia = ctaDifiere(cta, ctaServidor)
     const merged = (paso: "ingesta" | "brief" | "guion") => {
       const base = { ...guardados.current[paso] }
       if (paso === "ingesta") {
@@ -81,6 +176,10 @@ export function PanelEncargo({
       } else {
         const n = Number(campos.duracion)
         if (Number.isFinite(n) && n >= 1) base.duracion_min = Math.round(n)
+        // la caja de las llamadas a la acción solo viaja si alguien la
+        // ha tocado: escribirla apagada en un proyecto que no la tenía
+        // movería la firma del guion sin haber decidido nada
+        if (ctaCambia) base.cta = cta
       }
       return base
     }
@@ -96,7 +195,8 @@ export function PanelEncargo({
       // dejarlo intacto no es un cambio; escribirlo sería sembrar el
       // default (y volver obsoleto un guion ya pagado sin motivo)
       return (
-        Number.isFinite(n) && n >= 1 && Math.round(n) !== (b.duracion_min ?? 10)
+        (Number.isFinite(n) && n >= 1 && Math.round(n) !== (b.duracion_min ?? 10)) ||
+        ctaCambia
       )
     }
 
@@ -126,7 +226,7 @@ export function PanelEncargo({
     return () => clearTimeout(t)
     // alGuardar a propósito: estable durante la vida del panel
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [campos, pid])
+  }, [campos, cta, pid])
 
   const puede_guion = material_listo
 
@@ -204,6 +304,65 @@ export function PanelEncargo({
             que hagan falta para durarla
           </p>
         </div>
+      </div>
+
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <p className="text-sm font-medium">
+            Presentación y llamadas a la acción
+          </p>
+          <p className="text-xs text-muted-foreground">
+            las tres vienen apagadas: marca solo lo que quieras que este
+            vídeo haga
+          </p>
+        </div>
+        {MOMENTOS_CTA.map((m) => {
+          const ranura = cta[m.id]
+          return (
+            <div
+              key={m.id}
+              className={
+                "space-y-2 rounded-md border p-3 " +
+                (ranura.puesto ? "" : "opacity-80")
+              }
+            >
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-primary"
+                  checked={ranura.puesto}
+                  onChange={(e) =>
+                    cambiarCta(m.id, { puesto: e.target.checked })
+                  }
+                />
+                {m.nombre}
+              </label>
+              <p className="pl-6 text-xs text-muted-foreground">{m.pista}</p>
+              {ranura.puesto && (
+                <div className="space-y-2 pl-6">
+                  <Etiqueta htmlFor={`cta-${m.id}`}>{m.etiqueta}</Etiqueta>
+                  <AreaTexto
+                    id={`cta-${m.id}`}
+                    filas={2}
+                    valor={ranura.texto}
+                    alCambiar={(e) =>
+                      cambiarCta(m.id, { texto: e.target.value })
+                    }
+                    placeholder={m.ejemplo}
+                  />
+                  {m.ayuda && (
+                    <p className="text-xs text-muted-foreground">{m.ayuda}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+        <p className="text-xs text-muted-foreground">
+          Cada uno es una escena más del guion —misma voz, mismo tono—,
+          no una cuña pegada al final. Lo que escribas es una indicación,
+          no el texto final: lo redacta con las palabras de ESTE vídeo.
+        </p>
       </div>
 
       <div className="flex flex-wrap items-center gap-3 rounded-md border bg-card p-3">
