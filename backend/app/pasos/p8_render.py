@@ -30,6 +30,7 @@ import tempfile
 from pathlib import Path
 
 from ..config import AJUSTES
+from ..nucleo import grafismo
 from ..nucleo.proyecto import Proyecto
 from . import cartelas, comun, p2_brief, sonido, subtitulos, transiciones
 
@@ -346,9 +347,16 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
         # es SIEMPRE la entrada 1 (los PNGs entran detrás)
         partes, previo, entrada = [], "[base]", 2
         for k, (texto, desde, dura) in enumerate(ventanas):
+            # la alfa del velo es cosa SOLO del subtítulo (`subtitulo_caja`
+            # en los datos de callouts): la paleta la comparten cartelas y
+            # rótulo, y este mando no quiere tocarlos
+            paleta_sub = cfg.get("paleta")
+            if cfg.get("subtitulo_caja") not in (None, "auto"):
+                paleta_sub = grafismo.con_opacidad(paleta_sub or {},
+                                                   cfg["subtitulo_caja"])
             png = _subtitulo_png(
                 texto, destino.parent / f"{plano['id']}_sub{k + 1}.png",
-                paleta=cfg.get("paleta"), tam=cfg.get("tam", "normal"),
+                paleta=paleta_sub, tam=cfg.get("tam", "normal"),
                 diseno=cfg.get("diseno", "pastilla"))
             if png is None:
                 continue
@@ -587,7 +595,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     # poder reproducir qué diseño dibujó)
     cfg_grafismo = {"diseno": callouts.get("diseno", "pastilla"),
                     "paleta": callouts.get("paleta") or {},
-                    "tam": callouts.get("subtitulo_tam", "normal")}
+                    "tam": callouts.get("subtitulo_tam", "normal"),
+                    "subtitulo_caja": callouts.get("subtitulo_caja", "auto")}
     temporal = Path(tempfile.mkdtemp(prefix="render_"))
     segmentos, sids, cortes = [], [], []
     total = 0.0

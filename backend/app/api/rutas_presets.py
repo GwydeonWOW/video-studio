@@ -34,8 +34,8 @@ from ..motores import llm, voz_elevenlabs
 from ..nucleo import grafismo
 from ..nucleo.estado import Estado
 from ..nucleo.proyecto import Proyecto, ahora, escribir_json, ruta_contenida
-from ..pasos import (comun, guia_estilo, moodboard, p4_voz, presets_canal,
-                     presets_light, presets_voz, registro)
+from ..pasos import (comun, enrutar_estilo, guia_estilo, moodboard, p4_voz,
+                     presets_canal, presets_light, presets_voz, registro)
 from .rutas_trabajos import GESTOR
 
 router = APIRouter(prefix="/api", tags=["presets"])
@@ -424,8 +424,17 @@ def _tarea_guia(taller, estado, encargo, trabajo) -> dict:
 def _tarea_referencias(taller, estado, encargo, trabajo) -> dict:
     guia = guia_estilo.guia_de(estado.paso("assets").get("params", {}))
     clave = moodboard.clave_de(guia)
-    resultado = moodboard.generar(clave, guia, avisar=trabajo.avance,
-                                  proyecto_id=taller.id,
+    # LAS LÁMINAS DE ESTA PASADA viajan en el encargo (no en params): es
+    # la corrección de HOY — «solo esta, el resto como están» — y si se
+    # guardara se volvería a aplicar sola en la siguiente regeneración.
+    # Diccionario vacío son las seis, que es lo de siempre.
+    laminas = {str(e): " ".join(str(p or "").split())
+               for e, p in (encargo.get("laminas") or {}).items()
+               if e in moodboard.EJES and " ".join(str(p or "").split())}
+    resultado = moodboard.generar(clave, guia,
+                                  ejes=(sorted(laminas) if laminas else None),
+                                  peticiones=(laminas or None),
+                                  avisar=trabajo.avance, proyecto_id=taller.id,
                                   idioma=str(encargo.get("idioma") or ""))
     # aprobar mueve la propuesta al banco; si todo estaba ya aprobado no
     # hay propuesta y no hay nada que mover (retomar a medias)
@@ -438,6 +447,15 @@ def _tarea_referencias(taller, estado, encargo, trabajo) -> dict:
 def _tarea_grafismo(taller, estado, encargo, trabajo) -> dict:
     guia = guia_estilo.guia_de(estado.paso("assets").get("params", {}))
     grafismo_params = _grafismo_de_guia(encargo.get("estilo_prompt", ""), guia)
+    if encargo.get("fija_diseno"):
+        # EL SET LO ACABA DE FIJAR LA CORRECCIÓN (enrutar_estilo lo
+        # escribió en los params antes de lanzar el trabajo): derivarlo
+        # de la guía aquí se lo llevaría por delante y el vídeo saldría
+        # igual que estaba — el cambio aplicado y sin aplicar.
+        fijado = str(estado.paso("callouts").get("params", {})
+                     .get("diseno") or "").strip()
+        if fijado in grafismo.SETS_DISENO:
+            grafismo_params["diseno"] = fijado
     estado.actualizar_params("callouts", grafismo_params)
     trabajo.avance(f"grafismo: set «{grafismo_params['diseno']}», "
                    f"{len(grafismo_params['paleta']['fijados'])} colores "
@@ -626,14 +644,20 @@ def _congelar(taller: Proyecto, prid: str | None, encargo: dict) -> dict:
 
 
 def _correr_taller(taller: Proyecto, prid: str | None, solo=None,
-                   retomar: bool = False) -> dict:
+                   retomar: bool = False, extra_encargo: dict | None = None) -> dict:
     """La función del trabajo: tanda a tanda, congelando al final.
 
     `retomar` es para reanudar un taller cortado a medias (se salta lo
     que ya está en disco); nadie más salta nada.
+
+    `extra_encargo` es el SOBRE de esta pasada (`laminas`, `fija_diseno`
+    del reparto de `enrutar_estilo`): se encima al encargo guardado DENTRO
+    de la función y NUNCA se persiste — es lo que se corrige hoy, no lo
+    que el estilo es. `_congelar` copia el encargo con claves explícitas,
+    así que el sobre no llega al preset.
     """
     def funcion(trabajo):
-        encargo = _encargo_de(taller)
+        encargo = {**_encargo_de(taller), **(extra_encargo or {})}
         tandas = presets_light.tandas_de(encargo, solo=solo)
         for tanda in tandas:
             trabajo.comprobar_cancelacion()
@@ -643,6 +667,32 @@ def _correr_taller(taller: Proyecto, prid: str | None, solo=None,
         trabajo.avance(f"preset guardado: {ficha['nombre']}")
         return {"preset": ficha}
     return funcion
+
+
+def _estado_del_estilo(taller: Proyecto) -> str:
+    """Cómo está el estilo AHORA, para que el reparto sepa qué hay.
+
+    Lo que quien corrige puede ver en la tarjeta: el set de grafismo,
+    los mandos del subtítulo y LAS SEIS LÁMINAS numeradas EN EL ORDEN EN
+    QUE SE VEN (el de `moodboard.ficha_de`, que es el que compone la
+    miniatura), con lo que ya se le pidió a cada una — una corrección
+    nueva sobre una lámina corregida se SUMA a la vieja, y quien reparte
+    necesita saberlo para no prometer de más.
+    """
+    estado = Estado(taller)
+    params = estado.paso("callouts").get("params", {})
+    lineas = [f"grafismo: set «{params.get('diseno') or 'pastilla'}»",
+              f"subtítulo: tamaño {params.get('subtitulo_tam') or 'normal'}, "
+              f"caja {params.get('subtitulo_caja', 'auto')}"]
+    guia = guia_estilo.guia_de(estado.paso("assets").get("params", {}))
+    ficha = moodboard.ficha_de(moodboard.clave_de(guia)) or {}
+    pedidas = ficha.get("peticiones") or {}
+    for indice, eje in enumerate(ficha.get("ejes") or [], start=1):
+        titulo = (moodboard.EJES.get(eje) or {}).get("titulo") or eje
+        vieja = " ".join(str(pedidas.get(eje) or "").split())
+        lineas.append(f"{indice}. {titulo}"
+                      + (f" (ya se le pidió: {vieja})" if vieja else ""))
+    return "\n".join(lineas)
 
 
 # ------------------------------------------------------------ las rutas light
@@ -836,6 +886,13 @@ def regenerar_light(prid: str, cuerpo: dict) -> dict:
     imágenes nuevas se siembran en el taller antes de rehacer. Con
     material nuevo el kit sembrado se reemplaza; sin él, la guía
     relee lo que ya estaba sembrado.
+
+    En el estilo SIN material nuevo, la frase se REPARTE antes de correr
+    nada (`pasos/enrutar_estilo.py`): un mando barato son dos números en
+    los params, y reescribir la guía y redibujar seis láminas para
+    acabar poniendo el mismo subtítulo es el fallo que el reparto evita.
+    La respuesta lleva `reparto.resumen` con lo decidido, o `sin_cambios`
+    cuando no hay mando para lo pedido.
     """
     datos = cuerpo if isinstance(cuerpo, dict) else {}
     parte = str(datos.get("parte") or "").strip()
@@ -855,8 +912,9 @@ def regenerar_light(prid: str, cuerpo: dict) -> dict:
                                  "duplica el preset para volver a generarlo")
     encargo = _encargo_de(taller)
     material = False
-    if parte == "estilo" and ("estilo_prompt" in fuente
-                              or "estilo_imagenes" in fuente):
+    cambia_fuente = (parte == "estilo" and ("estilo_prompt" in fuente
+                                            or "estilo_imagenes" in fuente))
+    if cambia_fuente:
         encargo["estilo_prompt"] = " ".join(
             str(fuente.get("estilo_prompt") or "").split())
         if fuente.get("estilo_imagenes"):
@@ -881,12 +939,45 @@ def regenerar_light(prid: str, cuerpo: dict) -> dict:
     _guardar_encargo(taller, encargo)
     taller.bitacora("preset_light_regenerar",
                     {"parte": parte, "material": material})
+    # EL REPARTO: con la fuente intacta, la frase decide qué hace falta
+    # rehacer (`pasos/enrutar_estilo.py`). Con material nuevo NO se
+    # reparte: la fuente del estilo cambió y TODO lo derivado de ella
+    # está viejo — rehacer el estilo entero no es el respaldo, es lo
+    # correcto.
+    reparto = None
+    if parte == "estilo" and not cambia_fuente:
+        reparto = enrutar_estilo.repartir(
+            feedback, _estado_del_estilo(taller), proyecto_id=taller.id)
+        # los params se escriben ANTES de lanzar el trabajo: si el trabajo
+        # se cancela a mitad, lo barato ya está aplicado y lo caro no se
+        # ha pagado — al revés quedaría pagado y sin aplicar.
+        for paso, claves in (reparto.get("params") or {}).items():
+            Estado(taller).actualizar_params(paso, claves)
+        if not reparto["tareas"]:
+            # sin_mando: no hay mando para eso. Se dice y no se lanza
+            # nada — gastar cuatro minutos para no cambiar nada es el
+            # fallo que este reparto existe para evitar.
+            return {"trabajo": None, "sin_cambios": True,
+                    "resumen": reparto["resumen"],
+                    "avisos": reparto["avisos"], "parte": parte,
+                    "material": material}
+    extra = ({"laminas": reparto["laminas"],
+              "fija_diseno": "diseno" in (reparto["params"].get("callouts")
+                                          or {})}
+             if reparto else None)
     trabajo = GESTOR.lanzar(taller.id, "taller",
                             _correr_taller(taller, prid,
-                                           solo=presets_light.PARTES[parte]
-                                           ["tareas"]))
-    return {"trabajo": GESTOR.estado(trabajo.id), "parte": parte,
-            "material": material}
+                                           solo=(reparto["tareas"] if reparto
+                                                 else presets_light.PARTES
+                                                 [parte]["tareas"]),
+                                           extra_encargo=extra))
+    salida = {"trabajo": GESTOR.estado(trabajo.id), "parte": parte,
+              "material": material}
+    if reparto:
+        salida["reparto"] = {"resumen": reparto["resumen"],
+                             "imagenes": reparto["imagenes"],
+                             "avisos": reparto["avisos"]}
+    return salida
 
 
 @router.put("/presets-light/{prid}", dependencies=_MUTAR)

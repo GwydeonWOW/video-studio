@@ -86,6 +86,27 @@ def tamano_de(subtitulo_tam: str) -> float:
     return SUB_TAMANOS.get(str(subtitulo_tam or "normal").lower(), 1.0)
 
 
+def con_opacidad(paleta: dict, valor) -> dict:
+    """La paleta con el VELO a otra alfa (0..1): cuánto tapa la caja.
+
+    `valor` puede ser numero (0.6) o la palabra "auto" (o cualquiera
+    rara): se devuelve la paleta TAL CUAL, que es la alfa que trae el
+    velo derivado del estilo. Es el mando `subtitulo_caja` de callouts.
+    """
+    paleta = dict(paleta or PALETA_DEFECTO)
+    try:
+        alfa = min(1.0, max(0.0, float(valor)))
+    except (TypeError, ValueError):
+        return paleta
+    velo = str(paleta.get("velo", "")).strip()
+    if velo.lower().startswith("rgba") and ")" in velo:
+        rgb = velo[velo.find("(") + 1:velo.rfind(")")].rsplit(",", 1)[0].strip()
+    else:
+        rgb = "10,12,16"
+    paleta["velo"] = f"rgba({rgb},{round(alfa, 3)})"
+    return paleta
+
+
 # ----------------------------------------------------------------- dibujo
 
 def _escapar(texto: str) -> str:

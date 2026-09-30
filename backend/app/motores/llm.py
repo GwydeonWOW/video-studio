@@ -107,6 +107,9 @@ ROLES_DEFECTO = {
     "conservacion": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
     "guia_estilo": {"proveedor": "glm", "modelo": "glm-5.3"},
     "asistente": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
+    # decide QUE se rehace al corregir el estilo con una frase
+    # (pasos/enrutar_estilo.py): clasificar barato, no crear
+    "enrutador": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
 }
 
 

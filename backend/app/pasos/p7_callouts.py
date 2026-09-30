@@ -33,7 +33,23 @@ SUB_ANCHO = 1400
 
 def params_defecto() -> dict:
     return {"diseno": "pastilla", "paleta": {"fijados": {}},
-            "subtitulo_tam": "normal"}
+            "subtitulo_tam": "normal", "subtitulo_caja": "auto"}
+
+
+def opacidad_de_caja(params: dict):
+    """La alfa del velo del subtítulo (mando `subtitulo_caja`).
+
+    "auto" (o cualquier valor sin número) es None: el velo tal como lo
+    derivó el estilo. Un número 0..1 lo fija a mano — el mando barato
+    del retoque `caja_subtitulo`, que rehace capas y render, nada más.
+    """
+    valor = (params or {}).get("subtitulo_caja", "auto")
+    if valor is None:
+        return None
+    try:
+        return min(1.0, max(0.0, float(valor)))
+    except (TypeError, ValueError):
+        return None
 
 
 def estimar(params: dict) -> dict:
@@ -128,12 +144,18 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     diseno = str(params.get("diseno", "pastilla"))
     if diseno not in grafismo.SETS_DISENO:
         diseno = "pastilla"
+    opacidad = opacidad_de_caja(params)
     return {"subtitulos": filas, "diseno": diseno,
             "cap_linea": cap_linea,
             "paleta": grafismo.paleta_de(_estilo_del_canal(),
                                          (params.get("paleta") or {})
                                          .get("fijados")),
-            "subtitulo_tam": str(params.get("subtitulo_tam", "normal"))}
+            "subtitulo_tam": str(params.get("subtitulo_tam", "normal")),
+            # la alfa del velo de la CAJA DEL SUBTÍTULO, escrita aparte:
+            # la paleta la comparten las cartelas y el rótulo, y este
+            # mando solo quiere tocar el pie del cuadro
+            "subtitulo_caja": (round(opacidad, 3) if opacidad is not None
+                               else "auto")}
 
 
 def _estilo_del_canal() -> str:

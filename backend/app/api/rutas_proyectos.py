@@ -33,8 +33,8 @@ from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
 from ..nucleo.trabajos import TrabajoCancelado
 from ..pasos import (cartelas, catalogo_visual, comun, conservar, cta,
                      direccion, encuadres, guia_estilo, moodboard, p2_brief,
-                     p3_guion, p4_voz, p6_assets, redactor, registro, repaso,
-                     sonido, transiciones)
+                     p3_guion, p4_voz, p5_revision_audio, p6_assets, redactor,
+                     registro, repaso, sonido, transiciones)
 from .rutas_trabajos import CABECERAS_SSE, GESTOR, _sse
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
@@ -743,7 +743,8 @@ def _correr(proyecto: Proyecto, paso: str, params: dict, unidades: list[str]):
         if unidades:
             datos = _fusionar_unidades(estado.datos_de(paso) or {}, datos, unidades)
         version = estado.completar(paso, params, datos,
-                                   unidades=_contar_unidades(datos))
+                                   unidades=_contar_unidades(datos),
+                                   hechas=unidades or None)
         proyecto.bitacora("paso_completado",
                           {"paso": paso, "version": version})
         with lock_de(proyecto.id):
@@ -827,7 +828,8 @@ def _correr_unidad(proyecto: Proyecto, paso: str, unidad: str,
         datos = estado.datos_de(paso) or {}
         _sustituir_unidad(datos, unidad, ficha)
         version = estado.completar(paso, paso_params, datos,
-                                   unidades=_contar_unidades(datos))
+                                   unidades=_contar_unidades(datos),
+                                   hechas=[unidad])
         for consumidor in _CONSUMIDORES.get(paso, []):
             estado.marcar_obsoleto(consumidor, [unidad])
         proyecto.bitacora("unidad_corregida",
@@ -857,19 +859,136 @@ def reescribir_escena(pid: str, escena: str, cuerpo: dict) -> dict:
     return GESTOR.estado(trabajo.id)
 
 
+def _correr_cadena(proyecto: Proyecto, escena: str, reescritura,
+                   params_guion: dict, params_voz: dict):
+    """Cierre del gesto encadenado de la revisión de audio.
+
+    Reescribe la narración de UNA escena y regraba SU audio en el mismo
+    trabajo: comentario → texto nuevo → voz nueva. Es la excepción
+    honrada a «este módulo jamás encadena»: aquí la persona ya escuchó
+    la toma y pidió el cambio — encadenarlo a mano sería dos gestos y
+    una ventana para regrabar texto viejo.
+
+    `reescritura(trabajo)` -> (ficha_guion | None, aviso). Con None (la
+    reescritura falló o dejó el texto igual) NO se regraba: grabar el
+    mismo texto otra vez es pagar ElevenLabs por una copia, y el aviso
+    sube a la respuesta del trabajo.
+    """
+    estado = Estado(proyecto)
+
+    def funcion(trabajo):
+        reescrito, aviso = False, ""
+        if reescritura is not None:
+            trabajo.avance(f"reescribiendo {escena}")
+            ficha, aviso = reescritura(trabajo)
+            if ficha is not None:
+                datos = estado.datos_de("guion") or {}
+                _sustituir_unidad(datos, escena, ficha)
+                estado.completar("guion", params_guion, datos,
+                                 unidades=_contar_unidades(datos),
+                                 hechas=[escena])
+                # la unidad viaja ENTERA aguas abajo: la voz la regraba
+                # esta cadena, las imágenes quedan marcadas para que las
+                # accione quien las paga
+                for consumidor in _CONSUMIDORES["guion"]:
+                    if consumidor != "voz":
+                        estado.marcar_obsoleto(consumidor, [escena])
+                reescrito = True
+        if not reescrito:
+            return {"escena": escena, "reescrito": False, "regrabado": False,
+                    "aviso": aviso or "la reescritura no cambió el texto"}
+        trabajo.avance(f"regrabando el audio de {escena}")
+        p4_voz.regrabar_escena(proyecto, escena, params_voz)  # escribe datos
+        datos_voz = estado.datos_de("voz") or {}
+        version = estado.completar("voz", params_voz, datos_voz,
+                                   unidades=_contar_unidades(datos_voz),
+                                   hechas=[escena])
+        estado.marcar_obsoleto("revision_audio", [escena])
+        proyecto.bitacora("revision_encadenada",
+                          {"escena": escena, "version_voz": version})
+        return {"escena": escena, "reescrito": True, "regrabado": True,
+                "version_voz": version, "aviso": aviso}
+
+    return funcion
+
+
 @router.post("/{pid}/voz/escenas/{escena}/regrabar",
              status_code=202, dependencies=_MUTAR)
-def regrabar_escena(pid: str, escena: str) -> dict:
-    """Regraba el audio de UNA escena con los params de voz guardados."""
+def regrabar_escena(pid: str, escena: str, cuerpo: dict | None = None) -> dict:
+    """Regraba el audio de UNA escena con los params de voz guardados.
+
+    Con {peticion} es un MICROCAMBIO encadenado: la petición reescribe la
+    narración de esa escena y el audio se graba del texto nuevo, en un
+    gesto — el que sale natural mientras se escucha la toma.
+    """
     proyecto = _proyecto_o_404(pid)
-    params = Estado(proyecto).paso("voz").get("params", {})
+    cuerpo = cuerpo or {}
+    peticion = str(cuerpo.get("peticion", "")).strip()
+    estado = Estado(proyecto)
+    params_voz = estado.paso("voz").get("params", {})
+    if peticion:
+        params_guion = estado.paso("guion").get("params", {})
 
-    def unidad(trabajo):
-        return p4_voz.regrabar_escena(proyecto, escena, params)
+        def reescritura(trabajo):
+            return p3_guion.reescribir_escena(proyecto, escena, peticion,
+                                              trabajo), ""
 
-    trabajo = GESTOR.lanzar(pid, "voz",
-                            _correr_unidad(proyecto, "voz", escena,
-                                           unidad, params),
+        funcion = _correr_cadena(proyecto, escena, reescritura,
+                                 params_guion, params_voz)
+    else:
+        def unidad(trabajo):
+            return p4_voz.regrabar_escena(proyecto, escena, params_voz)
+
+        funcion = _correr_unidad(proyecto, "voz", escena, unidad, params_voz)
+    trabajo = GESTOR.lanzar(pid, "voz", funcion, unidades=[escena])
+    return GESTOR.estado(trabajo.id)
+
+
+@router.post("/{pid}/revision_audio/escenas/{escena}/comentarios",
+             status_code=202, dependencies=_MUTAR)
+def comentar_escena(pid: str, escena: str, cuerpo: dict) -> dict:
+    """Notas al estilo Google Docs sobre UNA escena: la cadena completa.
+
+    Cada nota apunta a un trozo de la narración (los offsets del
+    navegador solo se aceptan si el texto que hay ahí es el seleccionado).
+    El paso reescribe la escena con TODAS sus notas y regraba el audio
+    del texto nuevo en el mismo trabajo. Una nota que no se pudo aplicar
+    vuelve como aviso con el texto intacto.
+    """
+    proyecto = _proyecto_o_404(pid)
+    cuerpo = cuerpo or {}
+    comentarios = [c for c in cuerpo.get("comentarios") or []
+                   if isinstance(c, dict)]
+    if not comentarios:
+        raise HTTPException(400, "falta la lista de comentarios")
+    estado = Estado(proyecto)
+    guion = estado.datos_de("guion")
+    if not guion:
+        raise HTTPException(409, "todavía no hay guion que comentar")
+    if escena not in _unidades_del_paso(estado, "guion"):
+        raise HTTPException(404, f"no hay ninguna escena {escena}")
+    if not estado.datos_de("voz"):
+        raise HTTPException(409, "todavía no hay voz que revisar")
+    params_guion = estado.paso("guion").get("params", {})
+    params_voz = estado.paso("voz").get("params", {})
+
+    def reescritura(trabajo):
+        actual = next((e for e in guion.get("escenas", [])
+                       if isinstance(e, dict) and str(e.get("id")) == escena),
+                      None)
+        nuevo, aviso = p5_revision_audio.reescribir_bloque(
+            actual, p5_revision_audio.agrupar_comentarios(
+                comentarios).get(escena, []), proyecto_id=pid)
+        if aviso or nuevo.strip() == str(actual.get("narracion",
+                                                    "")).strip():
+            return None, aviso or "la reescritura no cambió el texto"
+        ficha = dict(actual)
+        ficha["narracion"] = nuevo
+        return ficha, ""
+
+    trabajo = GESTOR.lanzar(pid, "revision_audio",
+                            _correr_cadena(proyecto, escena, reescritura,
+                                           params_guion, params_voz),
                             unidades=[escena])
     return GESTOR.estado(trabajo.id)
 
@@ -952,7 +1071,8 @@ def _corregir_unidad(proyecto: Proyecto, paso: str, unidad: str,
         datos = estado.datos_de(paso) or {}
         _sustituir_unidad(datos, unidad, ficha)
         version = estado.completar(paso, params, datos,
-                                   unidades=_contar_unidades(datos))
+                                   unidades=_contar_unidades(datos),
+                                   hechas=[unidad])
         for consumidor in _CONSUMIDORES.get(paso, []):
             estado.marcar_obsoleto(consumidor, [unidad])
         proyecto.bitacora("unidad_corregida",
@@ -1063,7 +1183,8 @@ def reescribir_bloques(pid: str, cuerpo: dict) -> dict:
                        for e in escenas]
         datos["escenas"] = escenas
         version = estado.completar("guion", params, datos,
-                                   unidades=_contar_unidades(datos))
+                                   unidades=_contar_unidades(datos),
+                                   hechas=ids)
         for consumidor in _CONSUMIDORES.get("guion", []):
             estado.marcar_obsoleto(consumidor, ids)
         proyecto.bitacora("bloques_reescritos",

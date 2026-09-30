@@ -44,6 +44,16 @@ _PADRES = {
     "render": ["revision_audio", "callouts"],
 }
 
+#: Pasos que trabajan POR UNIDAD (la escena). Cuando una unidad queda
+#: sucia, la marca baja a LA MISMA unidad de estos pasos — la firma por
+#: unidad del original ensuciaba la unidad, no el paso (su estado.py,
+#: `_unidades_obsoletas`), y esa es la granularidad que hace que
+#: corregir S003 no ofrezca rehacer S007. El render no está a propósito:
+#: su salida es UN vídeo, se rehace entero siempre, y su obsolescencia
+#: la dice la firma cuando callouts completa — marcarle unidades sería
+#: fingir una granularidad que no tiene.
+_POR_UNIDADES = {"guion", "voz", "revision_audio", "assets", "callouts"}
+
 
 def descendientes_de(paso: str) -> list[str]:
     """Hijos directos y lejanos en el grafo, en orden topologico."""
@@ -284,12 +294,18 @@ class Estado:
             escribir_json(self.proyecto.fichero_estado, estado)
         return ficha
 
-    def completar(self, paso: str, params: dict, datos, unidades: int = 0) -> int:
+    def completar(self, paso: str, params: dict, datos, unidades: int = 0,
+                  hechas: list | None = None) -> int:
         """Un paso termino: escribe datos + manifiesto + estado.
 
         Orden (leido del original, nucleo/estado.py): PRIMERO el manifiesto
         de la version, DESPUES datos.json, AL FINAL estado.json. Un fallo a
         medias deja la version anterior como activa y valida.
+
+        `hechas` son las unidades que ESTA pasada ha rehecho de verdad.
+        Sin ella (la pasada entera) no queda nada sucio; con ella sólo se
+        limpia lo rehecho: borrar también lo otro sería dar por bueno, en
+        silencio, un plano que nadie ha vuelto a tocar.
         """
         with lock_de(self.proyecto.id):
             estado = self.todo()
@@ -314,9 +330,17 @@ class Estado:
                           "firma": manifiesto["firma"],
                           "firma_calculada": manifiesto["firma"],
                           "sello_salida": _huella({"v": version,
-                                                   "datos": _resumen_de(datos)}),
-                          "obsoleto_unidades": [],
-                          "vale_unidades": []})
+                                                   "datos": _resumen_de(datos)})})
+            if hechas is None:
+                # una pasada ENTERA rehace todo: no queda nada sucio
+                ficha["obsoleto_unidades"] = []
+                ficha["vale_unidades"] = []
+            else:
+                rehechas = {str(u) for u in hechas}
+                ficha["obsoleto_unidades"] = sorted(
+                    set(ficha.get("obsoleto_unidades", [])) - rehechas)
+                ficha["vale_unidades"] = sorted(
+                    set(ficha.get("vale_unidades", [])) - rehechas)
             # una version nueva no hereda la aprobacion (puerta de voz)
             ficha.pop("aprobacion", None)
             escribir_json(self.proyecto.fichero_estado, estado)
@@ -325,32 +349,38 @@ class Estado:
     def marcar_obsoleto(self, paso: str, unidades: list | None = None) -> None:
         """Marca el paso (y la cascada aguas abajo) como obsoleto.
 
-        Con `unidades`: solo esas unidades. MARCA, no genera: la pantalla
-        acciona con el coste delante (regla del original).
+        Con `unidades`: LA MISMA unidad en el paso y en los pasos por
+        unidad de aguas abajo (voz, assets, callouts...). Corregir S003
+        no ensucia S007, y la pantalla acciona con el coste delante
+        (regla del original: la marca, nunca la generación).
+
+        Sin `unidades` es el paso entero lo que cambió (params o entrada
+        a lo ancho): se etiqueta él y todo lo que cuelga.
         """
         with lock_de(self.proyecto.id):
             estado = self.todo()
-            tocados = []
             if unidades is None:
                 # el paso entero y todo lo que cuelga
-                tocados = [paso] + descendientes_de(paso)
+                for nombre in [paso] + descendientes_de(paso):
+                    ficha = estado["pasos"].setdefault(nombre, {})
+                    ficha["firma_calculada"] = "obsoleto"
             else:
-                ficha = estado["pasos"].setdefault(paso, {})
-                marcadas = set(ficha.get("obsoleto_unidades", []))
-                vales = set(ficha.get("vale_unidades", []))
-                for unidad in unidades:
-                    marcadas.add(str(unidad))
-                    # re-marcar tras un cambio RETIRA el «vale» anterior:
-                    # la tarjeta vuelve, que es lo que se quiere
-                    vales.discard(str(unidad))
-                ficha["obsoleto_unidades"] = sorted(marcadas)
-                ficha["vale_unidades"] = sorted(vales)
-                tocados = descendientes_de(paso)
-            for nombre in tocados:
-                if nombre == paso and unidades is not None:
-                    continue  # ya quedo marcado por unidades
-                ficha = estado["pasos"].setdefault(nombre, {})
-                ficha["firma_calculada"] = "obsoleto"
+                # la unidad viaja ENTERA aguas abajo, a los pasos que
+                # trabajan por unidad (ver _POR_UNIDADES)
+                destinatarios = [paso] + [hijo for hijo in descendientes_de(paso)
+                                          if hijo in _POR_UNIDADES]
+                for nombre in destinatarios:
+                    ficha = estado["pasos"].setdefault(nombre, {})
+                    marcadas = set(ficha.get("obsoleto_unidades", []))
+                    vales = set(ficha.get("vale_unidades", []))
+                    for unidad in unidades:
+                        marcadas.add(str(unidad))
+                        # re-marcar tras un cambio RETIRA el «vale»
+                        # anterior: la tarjeta vuelve, que es lo que se
+                        # quiere
+                        vales.discard(str(unidad))
+                    ficha["obsoleto_unidades"] = sorted(marcadas)
+                    ficha["vale_unidades"] = sorted(vales)
             escribir_json(self.proyecto.fichero_estado, estado)
 
     def revertir(self, paso: str, version: int) -> dict:
