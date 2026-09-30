@@ -38,23 +38,57 @@ dicen sus palabras se FUNDE en uno solo y la cartela se escribe encima
 de su imagen (`_marcar_cartelas`) — hoy van SIEMPRE sobre imagen, así
 que pagan como cualquier otro plano; el texto lo dibuja el render al
 ritmo de la voz (`pasos/cartelas.py`).
+
+LAS CADENAS, Y LA REGLA DE LA TANDA
+-----------------------------------
+La regla del original sigue en pie: una TANDA (un trabajo del botón
+Generar) cada vez — dos jobs a la vez tardan el doble por imagen y
+pierden el registro del gasto. Pero DENTRO de una tanda los planos de
+SITIOS distintos son independientes: entre dos sets hay un corte de
+todas formas. Así que se agrupan por set y los grupos corren a la vez
+(`cadenas`, con el tope MAX_CADENAS): con seis sitios, el camino crítico
+pasa de 35 llamadas en fila a las del sitio más largo.
+
+EL GUARDIÁN DE PLANOS REPETIDOS
+-------------------------------
+Al terminar, `_planos_repetidos` comprueba que no haya dos planos con el
+mismo encargo o el mismo fichero byte a byte: es un fallo que en la
+rejilla se ve como «repetimos mucho» y callarlo hasta que alguien lo
+note a ojo sale más caro que abortar aquí. Tiene dos excepciones
+documentadas (la cartela y la continuación de un plano largo) y NO se
+añade ninguna a la ligera: un guardián calibrado sobre un fallo aprende
+a dar por bueno ese fallo.
 """
 from __future__ import annotations
+
+import threading
+
+from concurrent.futures import ThreadPoolExecutor
 
 from ..config import AJUSTES
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
 from . import (cartelas as cartelas_motor, catalogo_visual, comun,
-               encuadres, guia_estilo, marcas_tts, p2_brief)
+               corrector, encuadres, guia_estilo, marcas_tts, p2_brief)
 from ..motores import imagen_glm, reglas
 from ..motores.guion import segmentar
+
+#: Tope de cadenas de generación a la vez (una por sitio, hasta cuatro).
+#: El grafo no pide más: los sitios son independientes entre sí.
+MAX_CADENAS = 4
 
 
 def params_defecto() -> dict:
     return {"calidad": AJUSTES.calidad_imagen, "estilo": "",
             # el ritmo del montaje: la horquilla de plano que obedece
             # el corte (TOPE, no precio: ver segmentar.ESCALERA)
-            "planos_min_s": 3.0, "planos_max_s": 6.0}
+            "planos_min_s": 3.0, "planos_max_s": 6.0,
+            # LA SEMILLA del reparto de encuadres: un proyecto nuevo
+            # nace con 7 (regla del original) y las lectas caen a 0
+            "semilla": 7,
+            # Cadenas de generación a la vez: 0 = automático (una por
+            # sitio, tope MAX_CADENAS), 1 = en fila, N = tope de N
+            "cadenas": 0}
 
 
 def estimar(params: dict) -> dict:
@@ -62,11 +96,14 @@ def estimar(params: dict) -> dict:
             "coste": None}
 
 
-def _capas_catalogo(params: dict, sid: str) -> list[str]:
+def _capas_catalogo(params: dict, sid: str,
+                    personajes: list | None = None) -> list[str]:
     """El sitio, la luz y quién sale: el andamio del catálogo visual.
 
     Sin catálogo devuelve [] (no es obligatorio), y entonces el plano
-    se arma como siempre: estilo + direccion + frase.
+    se arma como siempre: estilo + direccion + frase. `personajes`
+    overridea a los del beat: es lo que trae el CORRECTOR («quién sale
+    en el plano NUEVO»), que manda sobre el plan para ESTA pasada.
     """
     catalogo = catalogo_visual.catalogo_de(params)
     if not catalogo.get("beats"):
@@ -81,7 +118,9 @@ def _capas_catalogo(params: dict, sid: str) -> list[str]:
     if luz:
         lineas.append(f"Lighting: {luz}")
     reparto = catalogo.get("reparto") or {}
-    presentes = [reparto[pid] for pid in (beat.get("personajes") or [])
+    quienes = (personajes if personajes is not None
+               else (beat.get("personajes") or []))
+    presentes = [reparto[pid] for pid in quienes
                  if pid in reparto]
     fisicos = [" ".join(str(p.get("descripcion") or "").split())
                for p in presentes]
@@ -105,9 +144,51 @@ def _capas_catalogo(params: dict, sid: str) -> list[str]:
     return lineas
 
 
+def _frase_de_referencia(ref: dict) -> str:
+    """Lo que el generador oye de una referencia, según su clase.
+
+    La misma frase para todos los planos (regla del original): la clase
+    decide el trato por defecto y el detalle del corrector decide el
+    resto.
+    """
+    clase = str(ref.get("clase") or "adjunta")
+    if clase == "rechazada":
+        return ("It is this very shot as it was drawn: keep everything "
+                "and change only what the note asks.")
+    if clase == "continuidad":
+        extra = ", same set" if ref.get("mismo_set") else ""
+        return (f"It is a neighbouring shot: same palette, same light"
+                f"{extra}; do not copy its framing or poses.")
+    if clase == "reparto":
+        nombre = " ".join(str(ref.get("nombre") or "").split())
+        return (f"It is how {nombre or 'that character'} looks: copy "
+                f"the face, hair, body and clothes; nothing else.")
+    return "Use it ONLY for what the note asks of it."
+
+
+def _referencias_textuales(corregido: dict) -> list[str]:
+    """Las referencias del corrector como líneas del prompt.
+
+    El motor de aquí no adjunta imágenes (ver corrector.py): cada
+    referencia viaja como su FRASE DE CLASE —la misma que oiría un plano
+    nuevo— con el detalle del agente encima, que es lo que SOLO se sabe
+    mirando la imagen.
+    """
+    lineas = []
+    for ref in (corregido.get("referencias") or []):
+        if not isinstance(ref, dict):
+            continue
+        detalle = " ".join(str(ref.get("detalle") or "").split())
+        frase = _frase_de_referencia(ref)
+        if detalle:
+            frase = f"{frase.rstrip('.')}. {detalle}"
+        lineas.append(f"Reference: {frase}")
+    return lineas
+
+
 def prompt_de(escena: dict, unidades: dict, params: dict,
               carta: dict | None = None, frase: str | None = None,
-              idioma: str = "") -> str:
+              idioma: str = "", correccion: dict | None = None) -> str:
     """El encargo de imagen de un plano, armado por capas.
 
     La misma cuenta usa la pantalla para ENSEÑAR el prompt antes de
@@ -118,27 +199,41 @@ def prompt_de(escena: dict, unidades: dict, params: dict,
 
     `idioma` solo añade una línea de dato («The language of this film
     is Spanish.») pegada a la regla de la casa que la interpreta.
+
+    `correccion` es lo que devolvió el CORRECTOR para la nota de esta
+    unidad (ver pasos/corrector.py): su descripción sustituye a la capa
+    visual, sus personajes a los del beat, sus referencias entran como
+    líneas y su alcance manda sobre la última nota. Con {"error"} o
+    None se vuelve al camino de siempre: la nota pegada al final.
     """
     ficha = unidades.get(escena["id"]) or {}
+    corregido = (correccion if isinstance(correccion, dict)
+                 and not correccion.get("error") else None)
     # EL HISTORIAL DE FEEDBACK MANDA SOBRE TODO: es lo que este plano ya
     # hizo mal (repaso, capturas anotadas). Sin releerlo, regenerar
     # repetiría el error y la nota quedaría «aplicada».
     correcciones = []
-    for nota in (ficha.get("feedback") or []):
-        if not isinstance(nota, dict):
-            continue
+    notas = [n for n in (ficha.get("feedback") or [])
+             if isinstance(n, dict)]
+    for numero, nota in enumerate(notas):
         texto = " ".join(str(nota.get("texto") or "").split())
         if not texto:
             continue
         alcance = str(nota.get("alcance") or "")
+        if corregido and numero == len(notas) - 1:
+            # la última nota es la que el corrector ha leído: SU alcance
+            # (el que miró la imagen para decidir) manda sobre el que
+            # trajera la propia nota
+            alcance = corregido["alcance"]
         prefijo = ("LOCALIZED fix, keep the rest of the frame as is"
                    if alcance == "retoque" else "Replace the subject")
         correcciones.append(f"Correction: {prefijo}. {texto}")
+    referencias = _referencias_textuales(corregido) if corregido else []
     redactado = " ".join(str(ficha.get("prompt") or "").split())
     if redactado:
         # el redactor escribe el encargo ENTERO, pero las correcciones
         # posteriores van ENCIMA
-        return "\n".join([redactado] + correcciones)
+        return "\n".join([redactado] + referencias + correcciones)
     piezas = []
     # la capa de estilo manda con la GUÍA si la hay (la biblia con
     # números); si no, el texto libre de siempre
@@ -163,23 +258,261 @@ def prompt_de(escena: dict, unidades: dict, params: dict,
     encuadre = " ".join(str((carta or {}).get("encuadre") or "").split())
     if encuadre:
         piezas.append(f"Shot type: {encuadre}")
-    piezas.extend(_capas_catalogo(params, escena["id"]))
+    piezas.extend(_capas_catalogo(params, escena["id"],
+                                  personajes=(corregido["personajes"]
+                                              if corregido else None)))
     direccion = " ".join(str(ficha.get("direccion") or "").split())
     if direccion:
         piezas.append(direccion)
-    visual = str(escena.get("visual") or "").strip()
-    if frase is not None and frase.strip():
-        # el momento del plano manda, con el visual de la escena como
-        # contexto si lo hay: es la capa que distingue vecinos
-        capa = f"{visual}. {frase.strip()}".strip() if visual else frase.strip()
-        piezas.append(capa)
+    # las referencias del corrector van ANTES de la descripción, como
+    # iban las adjuntas del original: sostienen lo que viene detrás
+    piezas.extend(referencias)
+    if corregido:
+        # la descripción del corrector SUSTITUYE a la composición visual
+        # (ya incorpora la nota y conserva lo que la nota no toca), pero
+        # el MOMENTO del plano se queda ENCIMA: es la capa que distingue
+        # vecinos — sin ella, todos los planos de la escena corregida
+        # pedirían la misma imagen y el guardián los tumbaría
+        momento = " ".join(str(frase or "").split())
+        piezas.append(" ".join(x for x in (corregido["escena"], momento)
+                               if x))
     else:
-        # limpiar: la narracion puede traer anotaciones de voz (<break>)
-        # y una etiqueta en el prompt de imagen es ruido que ademas paga
-        texto = visual or marcas_tts.limpiar(escena.get("narracion", ""))
-        if texto:
-            piezas.append(texto)
+        visual = str(escena.get("visual") or "").strip()
+        if frase is not None and frase.strip():
+            # el momento del plano manda, con el visual de la escena como
+            # contexto si lo hay: es la capa que distingue vecinos
+            capa = f"{visual}. {frase.strip()}".strip() if visual else frase.strip()
+            piezas.append(capa)
+        else:
+            # limpiar: la narracion puede traer anotaciones de voz (<break>)
+            # y una etiqueta en el prompt de imagen es ruido que ademas paga
+            texto = visual or marcas_tts.limpiar(escena.get("narracion", ""))
+            if texto:
+                piezas.append(texto)
     return "\n".join(piezas + correcciones) or "abstract neutral illustration"
+
+
+# ---------------------------------------------------- la nota y el corrector
+
+def _texto_feedback(valor) -> str:
+    """El feedback de una unidad como UN texto para el corrector.
+
+    El que escribe la pantalla es una cadena; el historial que dejan
+    las correcciones es una lista de fichas con 'texto'. Los dos tienen
+    que acabar DENTRO del encargo: el feedback movia la firma (se pagaba
+    una imagen nueva) pero el encargo era identico, asi que salia una
+    variacion de lo mismo y la nota del revisor se ignoraba entera.
+    """
+    if isinstance(valor, str):
+        return valor.strip()
+    if isinstance(valor, list):
+        trozos = [str(v.get("texto") or "").strip() for v in valor
+                  if isinstance(v, dict)]
+        return " | ".join(t for t in trozos if t)
+    return ""
+
+
+def _corrector_activo(params: dict) -> bool:
+    """Si este proyecto usa el corrector. Se apaga con `corrector: "no"`."""
+    return str((params or {}).get("corrector") or "").lower() != "no"
+
+
+def _inventario_para_nota(plano: dict, planos: list, params: dict,
+                          carpeta) -> list[dict]:
+    """Las referencias que el corrector puede citar, como fichas.
+
+    Cada ficha es {"clave", "que", "clase"} (+ los atributos que su
+    frase necesite, como `mismo_set` o `nombre`). En el original el
+    inventario era de RUTAS que el agente abría con Read y adjuntaba
+    luego el generador; aquí el generador solo lee texto (ver
+    corrector.py), así que la clave es un identificador corto y la
+    ficha viaja al prompt como línea.
+
+    ENTRAN: la imagen actual del plano (la rechazada), los VECINOS de
+    alrededor (con su sitio y lo que dicen, que es lo que decide si son
+    del mismo sitio) y el reparto entero. NO entran los sets ni las
+    láminas del estilo: ya viajan en el encargo como capas, y una
+    referencia que repite una capa no añade nada que el generador no
+    haya oído ya.
+    """
+    pid = str(plano.get("id") or "")
+    fichas: list[dict] = []
+    catalogo = catalogo_visual.catalogo_de(params)
+    beat = catalogo_visual.beat_de(catalogo, str(plano.get("escena"))) or {}
+
+    def meter(clave, que, clase, **extra):
+        if not any(f["clave"] == clave for f in fichas):
+            fichas.append(dict(extra, clave=str(clave), que=que,
+                               clase=clase))
+
+    if plano.get("imagen"):
+        ruta = carpeta / f"{pid}.png"
+        if ruta.is_file():
+            meter("rechazada",
+                  f"LA IMAGEN ACTUAL del plano {pid}, la que el revisor "
+                  "ha rechazado (viaja adjunta a tu mensaje)",
+                  "rechazada")
+    orden = [str(p.get("id") or "") for p in planos]
+    if pid in orden:
+        centro = orden.index(pid)
+        for indice in range(max(0, centro - corrector.VECINOS),
+                            min(len(planos), centro + corrector.VECINOS + 1)):
+            if indice == centro:
+                continue
+            vecino = planos[indice]
+            if not isinstance(vecino, dict) or not vecino.get("imagen"):
+                continue
+            su_beat = (catalogo_visual.beat_de(
+                catalogo, str(vecino.get("escena"))) or {})
+            donde = "ANTERIOR" if indice < centro else "SIGUIENTE"
+            dice = " ".join(str(vecino.get("narracion") or "").split())
+            meter(vecino["id"],
+                  f"el plano {vecino['id']}, {abs(indice - centro)} a este "
+                  f"({donde}); sitio '{su_beat.get('set') or '-'}'; dice: "
+                  f"{dice[:160]}",
+                  "continuidad",
+                  mismo_set=bool(su_beat.get("set")
+                                 and su_beat.get("set") == beat.get("set")))
+    for ident, ficha in ((catalogo.get("reparto") or {}).items()):
+        if isinstance(ficha, dict):
+            como = " ".join(str(ficha.get("descripcion") or "").split())
+            meter(f"reparto:{ident}",
+                  f"como es '{ident}': {como[:200]}", "reparto",
+                  nombre=str(ident))
+    return fichas
+
+
+def _corregir_con_agente(plano: dict, escena: dict, planos: list,
+                         unidades: dict, params: dict, carpeta, proyecto,
+                         carta: dict | None, previo: dict, avisar) -> dict:
+    """Pasa la nota de esta unidad por el corrector. -> dict (o {"error"}).
+
+    Nunca rompe la corrección: si el agente no contesta, quien llama
+    sigue con `prompt_de` sin corrección — la nota pegada al final, el
+    camino de siempre.
+    """
+    catalogo = catalogo_visual.catalogo_de(params)
+    beat = catalogo_visual.beat_de(catalogo, str(plano.get("escena"))) or {}
+    fichas = _inventario_para_nota(plano, planos, params, carpeta)
+    # la imagen rechazada es la SEMBRADA de la pasada anterior (ver el
+    # comedero de previos en `ejecutar`): este plano aún no se ha dibujado
+    ruta_actual = str(carpeta / f"{plano['id']}.png") \
+        if plano.get("imagen") and (carpeta / f"{plano['id']}.png").is_file() \
+        else ""
+    estilo = guia_estilo.bloque_de_estilo(params)
+    return corrector.preparar(
+        _texto_feedback((unidades.get(str(plano.get("escena"))) or {})
+                        .get("feedback")),
+        {"id": plano.get("id"),
+         "narracion": plano.get("narracion"),
+         "set": beat.get("set"),
+         "personajes": beat.get("personajes") or [],
+         # el encargo CON el que se dibujó lo que hay en disco: está en
+         # los datos de la pasada anterior, no en este plan recién cortado
+         "prompt": previo.get("prompt") if isinstance(previo, dict) else "",
+         "encuadre": (carta or {}).get("encuadre")},
+        catalogo, estilo, fichas,
+        titulo=str((proyecto.leer() or {}).get("nombre") or ""),
+        imagen_actual=ruta_actual,
+        proyecto_id=proyecto.id, avisar=avisar)
+
+
+# ----------------------------------------------- cadenas y el guardián
+
+def _cuantas_cadenas(params: dict, planos: list) -> int:
+    """Cuántas cadenas correr a la vez: por defecto, una por sitio, con tope.
+
+    0 (por defecto) = automático, 1 = en fila, N = tope de N. El
+    automático mira las dos restricciones y se queda con la más
+    estrecha: el paralelismo que admite el montaje son los SITIOS —
+    entre dos sets hay un corte de todas formas —, y el que admite la
+    casa es MAX_CADENAS.
+    """
+    try:
+        pedidas = int((params or {}).get("cadenas") or 0)
+    except (TypeError, ValueError):
+        pedidas = 0
+    if pedidas > 0:
+        return pedidas
+    catalogo = catalogo_visual.catalogo_de(params)
+    sitios = {(catalogo_visual.beat_de(catalogo, str(p.get("escena")))
+               or {}).get("set") or "\x00sin-set"
+              for p in planos if isinstance(p, dict)}
+    return max(1, min(len(sitios), MAX_CADENAS))
+
+
+def _cadenas_por_set(planos: list, params: dict) -> list[list[dict]]:
+    """Los planos agrupados por sitio, la cadena más larga primero.
+
+    Dentro de cada grupo se conserva el ORDEN del vídeo: es lo que hace
+    que el resultado sea el mismo vaya en fila o en cadenas.
+    """
+    catalogo = catalogo_visual.catalogo_de(params)
+    grupos: dict[str, list[dict]] = {}
+    for plano in planos:
+        if not isinstance(plano, dict):
+            continue
+        beat = (catalogo_visual.beat_de(catalogo, str(plano.get("escena")))
+                or {})
+        clave = beat.get("set") or "\x00sin-set"
+        grupos.setdefault(clave, []).append(plano)
+    return sorted(grupos.values(), key=len, reverse=True)
+
+
+def _planos_repetidos(planos: list, carpeta, copiados=()) -> list[list[str]]:
+    """Grupos de planos que han acabado con un fichero o un encargo idéntico.
+
+    Vale la pena comprobarlo aunque el encargo ya lleve la narración:
+    que dos planos compartan imagen es un fallo que en la UI se ve como
+    «repetimos mucho» y que en disco es un byte a byte idéntico.
+    Callarlo hasta que alguien lo note a ojo sale más caro que abortar
+    aquí.
+
+    LO QUE BUSCA ES UN FALLO CONCRETO: dos encargos que salieron
+    idénticos (la capa frase no llegó a distinguirlos) o dos ficheros
+    idénticos. Así que lo que comparte imagen A PROPÓSITO no cuenta, y
+    son dos casos:
+
+      la cartela        no tiene imagen ni pasa por el generador; dos
+                        cartelas iguales serían dos textos iguales, que
+                        se ve en la rejilla y no justifica tumbar una
+                        tanda ya pagada.
+      la CONTINUACIÓN   la segunda mitad de una toma que dura más es la
+                        MISMA imagen copiada: mismo fichero, zoom
+                        partido, sin transición en medio. Es byte a byte
+                        idéntica porque tiene que serlo.
+
+    Quién dice quién es continuación no es el disco sino el PLAN (los
+    ids con `sigue_a`): el guardián se calibra sobre lo que se ENCARGA,
+    no sobre lo que hay. **Un guardián calibrado sobre un fallo aprende
+    a dar por bueno ese fallo.**
+    """
+    copiados = set(copiados or ())
+    por_huella: dict[str, list[str]] = {}
+    por_encargo: dict[str, list[str]] = {}
+    for plano in planos:
+        if not isinstance(plano, dict) or not plano.get("imagen"):
+            continue                        # la cartela sin imagen no entra
+        pid = str(plano.get("id") or "")
+        if not pid or pid in copiados or plano.get("sigue_a"):
+            continue
+        huella = comun.huella_fichero(carpeta / f"{pid}.png")
+        if huella:
+            por_huella.setdefault(huella, []).append(pid)
+        encargo = str(plano.get("prompt") or "")
+        if encargo and encargo != "(cartela)":
+            por_encargo.setdefault(encargo, []).append(pid)
+    grupos = [sorted(ids) for ids in por_huella.values() if len(ids) > 1]
+    grupos += [sorted(ids) for ids in por_encargo.values() if len(ids) > 1]
+    # huella y encargo suelen caer juntos (mismo encargo, mismos bytes):
+    # el mismo grupo solo se cuenta UNA vez, o el fallo se lee doble
+    vistos, unicos = set(), []
+    for grupo in grupos:
+        clave = tuple(grupo)
+        if clave not in vistos:
+            vistos.add(clave)
+            unicos.append(grupo)
+    return unicos
 
 
 def es_cartela(unidades: dict, escena_id: str) -> dict | None:
@@ -362,8 +695,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     forzadas = {sid: str((ficha or {}).get("carta") or "")
                 for sid, ficha in unidades.items()
                 if isinstance(ficha, dict)}
-    cartas = encuadres.repartir(todas, semilla=proyecto.id,
-                                forzadas=forzadas)
+    cartas = encuadres.repartir(
+        todas, semilla=str(params.get("semilla", 0)), forzadas=forzadas)
     escenas = ([e for e in todas if e["id"] in solo_escenas]
                if solo_escenas else todas)
     minimo = max(0.5, float(params.get("planos_min_s") or 3.0))
@@ -424,10 +757,11 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     detalle_cartelas, avisos_cartelas = _marcar_cartelas(
         planos, unidades, trabajo, limitar=solo_escenas is None)
 
-    # FASE 2 — las imágenes, una a una (cuestan dinero). Las cartelas de
-    # hoy van SIEMPRE sobre la imagen del plano (`TODAS_SOBRE_IMAGEN`),
-    # así que pagan como cualquier otro; solo el fondo negro (en desuso)
-    # se libera.
+    # FASE 2 — las imágenes (cuestan dinero). Las cartelas de hoy van
+    # SIEMPRE sobre la imagen del plano (`TODAS_SOBRE_IMAGEN`), así que
+    # pagan como cualquier otro; solo el fondo negro (en desuso) se
+    # libera. Dentro de la tanda, los planos de SITIOS distintos son
+    # independientes: corren en CADENAS (una por set, con tope).
     a_pagar = [p for p in planos if not cartelas_motor.sin_imagen(p)]
     con_cartela = [p for p in planos if p.get("cartela")]
     if a_pagar and not imagen_glm.clave(claves):
@@ -437,31 +771,111 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     # el idioma del vídeo, leído UNA vez: solo sirve para la línea de
     # dato que acompaña a la regla del idioma en el prompt
     idioma = str(proyecto.leer().get("idioma", "es"))
+    # el encargo CON el que se dibujó cada plano la vez ANTERIOR: el
+    # corrector lo necesita delante para saber qué había antes de la nota
+    previo_de_id = {str(p.get("id")): p
+                    for p in (anteriores.get("planos") or [])
+                    if isinstance(p, dict)}
+    # se SIEMBRA lo pagado: un plano recién cortado aún no tiene imagen,
+    # pero su id puede ser el de la pasada anterior (el corte se hereda)
+    # y lo que hay en su disco ES la imagen que la persona rechazó. Sin
+    # esto el corrector no vería ni la rechazada ni a los vecinos
     for plano in planos:
+        previo = previo_de_id.get(str(plano.get("id")))
+        if isinstance(previo, dict) and previo.get("imagen"):
+            plano.setdefault("imagen", previo["imagen"])
+    # el contador y el registro del gasto compiten entre cadenas: sin
+    # cerrojo se pierden avances y operaciones del medidor
+    cerrojo = threading.Lock()
+
+    def dibujar(plano):
+        nonlocal pagadas
         trabajo.comprobar_cancelacion()
+        sid = plano["escena"]
+        escena = next(e for e in escenas if e["id"] == sid)
+        with cerrojo:
+            pagadas += 1
+            numero = pagadas
+        # LA NOTA DE LA PERSONA: si esta tanda es la respuesta a un
+        # rechazo con nota, el corrector la convierte en encargo antes
+        # de redactar el prompt (ver pasos/corrector.py). Si el agente
+        # no contesta, la nota viaja pegada al final como siempre.
+        corregido = None
+        nota_texto = _texto_feedback(
+            (unidades.get(sid) or {}).get("feedback"))
+        if (nota_texto and solo_escenas is not None
+                and _corrector_activo(params)):
+            corregido = _corregir_con_agente(
+                plano, escena, planos, unidades, params, carpeta, proyecto,
+                cartas.get(sid), previo_de_id.get(str(plano["id"])),
+                avisar=trabajo.avance)
+            if corregido.get("error"):
+                trabajo.avance(
+                    f"{plano['id']}: el corrector no ha contestado "
+                    f"({corregido['error']}); la nota viaja pegada al "
+                    "prompt como siempre")
+                corregido = None
+            else:
+                trabajo.avance(
+                    f"{plano['id']}: correccion '{corregido['alcance']}' "
+                    f"con {len(corregido['referencias'])} referencia(s)")
+        trabajo.avance(f"imagen {numero}/{len(a_pagar)}: {plano['id']} "
+                       "(cuesta dinero)")
+        destino = carpeta / f"{plano['id']}.png"
+        encargo = prompt_de(escena, unidades, params,
+                            carta=cartas.get(sid), frase=plano["narracion"],
+                            idioma=idioma, correccion=corregido)
+        imagen_glm.generar(
+            encargo, destino, calidad=calidad, claves=claves, estilo="")
+        with cerrojo:
+            anotar_operacion(
+                datos_dir=AJUSTES.datos, proyecto=proyecto.id,
+                operacion="imagen", proveedor="glm", modelo="glm-image",
+                calidad=calidad, contexto=f"assets:{plano['id']}",
+                proyecto_dir=proyecto.raiz)
+        plano["imagen"] = f"pasos/assets/imagenes/{plano['id']}.png"
+        plano["prompt"] = encargo
+
+    # las cartelas no pagan: se despachan antes de abrir cadenas
+    for plano in planos:
         if cartelas_motor.sin_imagen(plano):
             trabajo.avance(f"cartela {plano['id']} "
                            "(plano de texto: no se paga imagen)")
             plano["imagen"] = None
             plano["prompt"] = "(cartela)"
-            continue
-        sid = plano["escena"]
-        escena = next(e for e in escenas if e["id"] == sid)
-        pagadas += 1
-        trabajo.avance(f"imagen {pagadas}/{len(a_pagar)}: {plano['id']} "
-                       "(una a una, cuesta dinero)")
-        destino = carpeta / f"{plano['id']}.png"
-        encargo = prompt_de(escena, unidades, params,
-                            carta=cartas.get(sid), frase=plano["narracion"],
-                            idioma=idioma)
-        imagen_glm.generar(
-            encargo, destino, calidad=calidad, claves=claves, estilo="")
-        anotar_operacion(
-            datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="imagen",
-            proveedor="glm", modelo="glm-image", calidad=calidad,
-            contexto=f"assets:{plano['id']}", proyecto_dir=proyecto.raiz)
-        plano["imagen"] = f"pasos/assets/imagenes/{plano['id']}.png"
-        plano["prompt"] = encargo
+    cadenas = _cuantas_cadenas(params, a_pagar) if len(a_pagar) > 1 else 1
+    if cadenas <= 1 or len(a_pagar) <= 1:
+        for plano in planos:
+            if not cartelas_motor.sin_imagen(plano):
+                dibujar(plano)
+    else:
+        trabajo.avance(f"{cadenas} cadena(s) por sitio, dentro de la tanda")
+
+        def correr_grupo(grupo):
+            for plano in grupo:
+                if not cartelas_motor.sin_imagen(plano):
+                    dibujar(plano)
+
+        with ThreadPoolExecutor(max_workers=cadenas) as piscina:
+            futuros = [piscina.submit(correr_grupo, grupo)
+                       for grupo in _cadenas_por_set(planos, params)]
+            for futuro in futuros:
+                futuro.result()
+
+    # EL GUARDIÁN DE PLANOS REPETIDOS: dos planos con la MISMA imagen o
+    # el MISMO encargo son un fallo del corte, no de la generación, y
+    # tumban la tanda. Las continuaciones (sigue_a) son idénticas POR
+    # DISEÑO y la cartela no tiene imagen: no cuentan.
+    trabajo.avance("comprobando que no haya planos repetidos")
+    copiados = {str(p["id"]) for p in planos if p.get("sigue_a")}
+    repetidos = _planos_repetidos(planos, carpeta, copiados=copiados)
+    if repetidos:
+        detalle = "; ".join(" = ".join(grupo) for grupo in repetidos)
+        raise RuntimeError(
+            f"dos o mas planos han acabado con la MISMA imagen o el MISMO "
+            f"encargo: {detalle}. El corte deberia distinguirlos con la "
+            "capa frase: si sale otra vez, es un fallo del corte y no de "
+            "la generacion.")
 
     informe = (segmentar.informe(cortados, minimo, maximo, reparto=reparto)
                if cortados else None)
@@ -478,7 +892,11 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     return {"planos": planos, "calidad": calidad,
             "cartelas": len(con_cartela),
             **({"informe": informe} if informe else {}),
-            "ritmo": {"minimo": minimo, "maximo": maximo}}
+            "ritmo": {"minimo": minimo, "maximo": maximo},
+            # la semilla con la que se repartió: aparece en el resultado
+            # para que se sepa con qué se dibujó esto
+            "semilla": comun.desempatar(params.get("semilla", 0),
+                                        proyecto.id)}
 
 
 def regenerar_plano(proyecto: Proyecto, escena_id: str, params: dict) -> list:

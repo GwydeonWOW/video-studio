@@ -1,6 +1,7 @@
 """Utilidades comunes a todos los pasos del pipeline."""
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from pathlib import Path
@@ -93,3 +94,29 @@ def partir_en_frases(texto: str, max_caracteres: int = 90) -> list[str]:
     if actual:
         salida.append(actual)
     return salida
+
+
+def huella_fichero(ruta, bloque: int = 1 << 20) -> str:
+    """Hash del contenido de un fichero (cadena vacia si no existe).
+
+    Lo usa el guardian de planos repetidos de p6: dos imagenes
+    identicas son un fallo que en disco es un byte a byte identico.
+    """
+    if not ruta:
+        return ""
+    try:
+        if not Path(ruta).is_file():
+            return ""
+        resumen = hashlib.sha256()
+        with open(ruta, "rb") as fh:
+            for trozo in iter(lambda: fh.read(bloque), b""):
+                resumen.update(trozo)
+        return resumen.hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def desempatar(*partes) -> int:
+    """Entero estable a partir de varias claves: desempata sin usar random."""
+    return int(hashlib.sha256("|".join(str(p) for p in partes)
+                              .encode("utf-8")).hexdigest()[:8], 16)

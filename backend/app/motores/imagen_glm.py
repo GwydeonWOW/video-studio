@@ -5,9 +5,13 @@ la API de z.ai (api.z.ai/api/paas/v4), así que no hace falta ninguna
 clave de OpenAI para nada. Diferencia práctica con OpenAI: la respuesta
 trae una URL (no el b64), así que la imagen se descarga en el acto.
 
-Reglas de la tanda sin cambio (docs del original): una a una, nunca en
-paralelo, y calidad elegida al crear el proyecto. El precio es plano
-(~$0.015 por imagen); el medidor de coste lleva la cifra real.
+Reglas de la tanda sin cambio (docs del original): una TANDA cada vez
+—nunca dos trabajos de assets a la vez—, calidad elegida al crear el
+proyecto y, DENTRO de la tanda, cadenas por sitio con tope (ver
+pasos/p6_assets.py): los planos de sitios distintos son independientes
+y se dibujan en paralelo; los de un mismo sitio, en orden de vídeo.
+El precio es plano (~$0.015 por imagen); el medidor de coste lleva la
+cifra real.
 """
 from __future__ import annotations
 

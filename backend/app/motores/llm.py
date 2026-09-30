@@ -100,6 +100,10 @@ ROLES_DEFECTO = {
     "cartelas": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
     "repaso": {"proveedor": "glm", "modelo": "glm-5.3"},
     "catalogo": {"proveedor": "glm", "modelo": "glm-5.3"},
+    # el corrector de UN plano (pasos/corrector.py): lee la nota y mira
+    # la imagen rechazada — merece el modelo grande, y con imagen puesta
+    # se resuelve a vision (glm-5.3v) solo
+    "corrector": {"proveedor": "glm", "modelo": "glm-5.3"},
     "conservacion": {"proveedor": "glm", "modelo": "glm-5.3-flash"},
     "guia_estilo": {"proveedor": "glm", "modelo": "glm-5.3"},
     "asistente": {"proveedor": "glm", "modelo": "glm-5.3-flash"},

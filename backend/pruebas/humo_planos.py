@@ -124,7 +124,12 @@ _anotar_real = p6_assets.anotar_operacion
 def generar_falso(encargo, destino, **_):
     encargos.append(encargo)
     destino.parent.mkdir(parents=True, exist_ok=True)
-    destino.write_bytes(b"\x89PNG\r\n\x1a\nlaton")
+    # bytes DISTINTOS por encargo: el guardian de planos repetidos
+    # tumba la tanda si dos ficheros acaban identicos, y un doble que
+    # escribe siempre lo mismo lo dispararia sin haber fallo ninguno
+    import hashlib
+    destino.write_bytes(b"\x89PNG\r\n\x1a\n"
+                        + hashlib.sha256(encargo.encode("utf-8")).digest())
 
 
 imagen_glm.clave = lambda *a, **k: True
