@@ -1390,10 +1390,11 @@ function DialogoVisor({
     }
   }
 
-  const rotulo_visible =
-    escena?.rotulo != null &&
-    t_audio - escena.t_in >= escena.rotulo.aparece &&
-    t_audio - escena.t_in < escena.rotulo.aparece + escena.rotulo.dura
+  // el subtítulo del instante: un TROZO en el reloj del plano (t_in ya restado)
+  const trozo_visible =
+    escena?.trozos?.find(
+      (t) => t_audio - escena.t_in >= t.desde && t_audio - escena.t_in < t.hasta,
+    ) ?? null
 
   /** Compone el fotograma de la previsualización: imagen + rótulo tal
    * como se ven (la captura es de lo que se está MIRANDO). */
@@ -1410,21 +1411,23 @@ function DialogoVisor({
     const w = img.naturalWidth * escala
     const h = img.naturalHeight * escala
     ctx.drawImage(img, (1280 - w) / 2, (720 - h) / 2, w, h)
-    if (rotulo_visible && escena?.rotulo) {
-      const texto = escena.rotulo.texto
-      ctx.font = "600 44px system-ui, sans-serif"
+    if (trozo_visible) {
+      const texto = trozo_visible.texto
+      ctx.font = "600 40px system-ui, sans-serif"
       const metrica = ctx.measureText(texto)
-      const ancho = metrica.width + 56
-      const alto = 72
+      const ancho = Math.min(metrica.width + 56, 1200)
+      const alto = 64
       const x = (1280 - ancho) / 2
-      const y = 720 - 160
+      const y = 720 - 96
       ctx.fillStyle = "rgba(0,0,0,0.75)"
       ctx.beginPath()
-      ctx.roundRect(x, y, ancho, alto, 18)
+      ctx.roundRect(x, y, ancho, alto, 16)
       ctx.fill()
       ctx.fillStyle = "#fff"
       ctx.textBaseline = "middle"
-      ctx.fillText(texto, x + 28, y + alto / 2 + 2)
+      ctx.textAlign = "center"
+      ctx.fillText(texto, 640, y + alto / 2 + 2)
+      ctx.textAlign = "start"
     }
     ctx.fillStyle = "rgba(0,0,0,0.6)"
     ctx.fillRect(0, 0, 220, 34)
@@ -1442,8 +1445,8 @@ function DialogoVisor({
           <TituloDialogo>Mirar sin montar</TituloDialogo>
           <DescripcionDialogo>
             El vídeo antes de montarlo: la imagen y la voz de cada escena, al
-            ritmo de quien mira. El rótulo es texto de verdad (como se verá);
-            el zoom y los cortes sólo se ven en el MP4.
+            ritmo de quien mira. Los subtítulos son texto de verdad (como se
+            verán); el zoom y los cortes sólo se ven en el MP4.
           </DescripcionDialogo>
         </CabeceraDialogo>
         {!datos || !escena ? (
@@ -1472,10 +1475,10 @@ function DialogoVisor({
                   sin imagen para este plano (genera las imágenes)
                 </div>
               )}
-              {rotulo_visible && escena.rotulo && (
-                <div className="pointer-events-none absolute inset-x-0 bottom-10 flex justify-center px-6">
-                  <span className="rounded-2xl bg-black/75 px-6 py-3 text-lg font-semibold text-white">
-                    {escena.rotulo.texto}
+              {trozo_visible && (
+                <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center px-6">
+                  <span className="rounded-2xl bg-black/75 px-6 py-2.5 text-lg font-semibold text-white shadow-lg">
+                    {trozo_visible.texto}
                   </span>
                 </div>
               )}

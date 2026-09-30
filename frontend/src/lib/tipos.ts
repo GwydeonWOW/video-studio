@@ -133,18 +133,28 @@ export interface DatosAssets {
   ritmo?: { minimo: number; maximo: number }
 }
 
-export interface Rotulo {
-  id: string
+/** Un trozo de subtítulo: lo que se dice entre dos marcas de palabra. */
+export interface Trozo {
   texto: string
-  aparece: number
-  dura: number
+  /** segundos, en el reloj del plano */
+  desde: number
+  hasta: number
+}
+
+/** Los subtítulos de UN plano (la fila de p7, por id de plano). */
+export interface FilaSubtitulo {
+  id: string
+  escena: string
+  trozos: Trozo[]
 }
 
 export interface DatosCallouts {
-  rotulos: Rotulo[]
+  subtitulos: FilaSubtitulo[]
   diseno?: string
   paleta?: Paleta
   subtitulo_tam?: string
+  /** caracteres por línea con los que se troceó (según el tamaño) */
+  cap_linea?: number
 }
 
 export interface DatosRender {
@@ -280,7 +290,8 @@ export interface EscenaPrevia {
   t_out: number
   duracion: number
   palabras: { palabra: string; inicio: number; fin: number }[]
-  rotulo: { texto: string; aparece: number; dura: number } | null
+  /** los trozos de subtítulo de ESTE plano, en su reloj (t_in restado) */
+  trozos: Trozo[] | null
 }
 
 /** Las piezas para ver el vídeo sin montarlo (quien las junta es el navegador). */
@@ -288,7 +299,7 @@ export interface Previsualizacion {
   escenas: EscenaPrevia[]
   duracion: number
   resolucion: string
-  con_rotulos: boolean
+  con_subtitulos: boolean
   montado: boolean
   idioma: string
 }

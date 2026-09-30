@@ -1177,17 +1177,20 @@ export function PanelCallouts({ pid, ficha, recargar }: PropsPanel) {
   if (ficha.estado === "vacio")
     return (
       <Vacio
-        titulo="Sin rótulos"
-        detalle="Ejecuta el paso para decidir los textos en pantalla y su ritmo."
+        titulo="Sin subtítulos"
+        detalle="Ejecuta el paso para trocear la narración sobre las marcas de la voz."
       />
     )
   const datos = ficha.datos as DatosCallouts
+  const filas = datos.subtitulos ?? []
+  const total_trozos = filas.reduce((n, f) => n + f.trozos.length, 0)
   return (
     <div className="space-y-2">
       <ZonaPresetPaso pid={pid} tipo="rotulos" recargar={recargar} />
       <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm text-muted-foreground">
-          {(datos.rotulos ?? []).length} rótulo(s)
+          {total_trozos} trozo(s) en {filas.length} plano(s)
+          {datos.cap_linea && ` · hasta ${datos.cap_linea} car./línea`}
           {datos.diseno && ` · diseño «${datos.diseno}»`}
         </p>
         <Boton
@@ -1199,28 +1202,41 @@ export function PanelCallouts({ pid, ficha, recargar }: PropsPanel) {
           <Palette /> Diseño
         </Boton>
       </div>
-      {(datos.rotulos ?? []).length === 0 && (
+      {filas.length === 0 && (
         <p className="text-sm text-muted-foreground">
-          El paso decidió no poner rótulos.
+          Sin subtítulos: una voz sin marcas de palabra, o cuya narración no
+          cuadra con sus planos, no lleva (mejor eso que uno descuadrado).
         </p>
       )}
-      {(datos.rotulos ?? []).map((r) => (
+      {filas.map((f) => (
         <div
-          key={r.id}
-          className="flex items-center gap-3 rounded-md border bg-card px-3 py-2 text-sm"
+          key={f.id}
+          className="rounded-md border bg-card px-3 py-2 text-sm"
         >
-          <Insignia variante="secundario">{r.id}</Insignia>
-          <span className="font-medium">«{r.texto}»</span>
-          <span className="ml-auto text-xs text-muted-foreground">
-            {r.aparece.toFixed(1)}s → +{r.dura.toFixed(1)}s
-          </span>
-          <img
-            src={`/api/proyectos/${pid}/callouts/vista?plano=${r.id}`}
-            alt={`rótulo ${r.id}`}
-            className="h-8 rounded bg-muted"
-            title="cómo se dibuja este rótulo"
-            onError={(e) => (e.currentTarget.style.display = "none")}
-          />
+          <div className="flex items-center gap-2">
+            <Insignia variante="secundario">{f.id}</Insignia>
+            <span className="text-xs text-muted-foreground">
+              {f.trozos.length} trozo(s) · escena {f.escena}
+            </span>
+            <img
+              src={`/api/proyectos/${pid}/callouts/vista?plano=${f.id}`}
+              alt={`subtítulo ${f.id}`}
+              className="ml-auto h-8 rounded bg-muted"
+              title="cómo se dibuja este subtítulo"
+              onError={(e) => (e.currentTarget.style.display = "none")}
+            />
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {f.trozos.map((t, i) => (
+              <span
+                key={i}
+                className="rounded bg-muted px-2 py-1 text-xs"
+                title={`${t.desde.toFixed(2)}s → ${t.hasta.toFixed(2)}s (reloj del plano)`}
+              >
+                {t.texto}
+              </span>
+            ))}
+          </div>
         </div>
       ))}
       <DialogoGrafismo

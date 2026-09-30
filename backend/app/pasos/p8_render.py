@@ -3,8 +3,8 @@
 Por escena (duracion = la REAL de su audio):
 1. La imagen del plano se anima con un movimiento de camara suave
    (zoompan Ken Burns, alternando acercarse/alejarse por escena).
-2. El rotulo (si lo hay) entra en su instante con fundido (PNG de PIL
-   sobre el plano, alpha).
+2. Los subtitulos (si los hay) entran trozo a trozo en su instante,
+   en la banda del pie del cuadro, quietos (PNG de PIL con fundido).
 3. El audio de la escena viaja con el segmento.
 
 Despues, dos caminos:
@@ -31,13 +31,21 @@ from pathlib import Path
 
 from ..config import AJUSTES
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief, sonido, transiciones
+from . import comun, p2_brief, sonido, subtitulos, transiciones
 
 FPS = 30
 ANCHO, ALTO = 1920, 1080
 CALIDADES = {"borrador": {"preset": "veryfast", "crf": "26"},
              "estandar": {"preset": "medium", "crf": "22"},
              "detalle": {"preset": "slow", "crf": "18"}}
+
+#: La banda del subtítulo: el pie del cuadro, QUIETA (fuera del zoom).
+#: Mismo margen y mismo ancho que `subtitulos.banda_fija`.
+SUB_MARGEN = 72
+SUB_ANCHO = 1400
+#: El fundido del trozo: entra en 0,32 s y sale en 0,30 (del original).
+SUB_ENTRADA = 0.32
+SUB_SALIDA = 0.30
 
 #: fuentes candidatas para los rotulos (contenedor trae DejaVu)
 FUENTES = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -159,6 +167,93 @@ def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400,
     return destino
 
 
+def _subtitulo_png(texto: str, destino: Path, paleta: dict | None = None,
+                   tam: str = "normal", diseno: str = "pastilla",
+                   ancho_max: int = SUB_ANCHO) -> Path | None:
+    """Un TROZO de subtítulo dibujado: una o dos líneas PAREJAS, en caja.
+
+    El reparto de líneas lo decide `subtitulos.dos_lineas` midiendo con
+    la fuente de verdad (llenar la primera y dejar huérfana la última
+    canta en un bloque centrado), y la caja es UNA por trozo, no una por
+    renglón: dos cajas de anchos distintos apiladas dibujan un escalón
+    y eso convierte un subtítulo en un cartel. El texto se ancla por
+    abajo en el overlay (y=H-h-margen), así que un trozo de una línea y
+    otro de dos acaban a la misma altura.
+    """
+    from PIL import Image, ImageDraw
+    from ..nucleo import grafismo
+    paleta = paleta or dict(grafismo.PALETA_DEFECTO)
+    caja = grafismo.SETS_DISENO.get(diseno,
+                                     grafismo.SETS_DISENO["pastilla"])["caja"]
+    tamano = int(52 * grafismo.tamano_de(tam))
+    fuente = _fuente_de(tamano)
+    prueba = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+
+    def medir(cadena: str) -> int:
+        return prueba.textbbox((0, 0), cadena, font=fuente)[2]
+
+    lineas = subtitulos.dos_lineas(texto, medir, ancho_max)
+    if not lineas:
+        return None
+    salto = int(tamano * 1.28)
+    aire_x, aire_y = int(tamano * 0.62), int(tamano * 0.24)
+    ancho_texto = max(medir(linea) for linea in lineas)
+    ancho = ANCHO if caja == "pleno" else ancho_texto + 2 * aire_x
+    alto = 2 * aire_y + salto * (len(lineas) - 1) + tamano + tamano // 4
+    imagen = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
+    dibujo = ImageDraw.Draw(imagen)
+    velo = _color(paleta.get("velo"))
+    acento = _color(paleta.get("acento"))
+    tinta = _color(paleta.get("texto"))
+    if caja == "sombra":
+        pass          # sin caja: texto claro con sombra suave, dos capas
+    elif caja == "pleno":
+        dibujo.rectangle([0, 0, ancho, alto], fill=velo)
+        dibujo.rectangle([0, 0, 14, alto], fill=acento)
+    elif caja == "barra":
+        dibujo.rounded_rectangle([0, 0, ancho, alto], radius=4, fill=velo)
+        dibujo.rectangle([aire_x // 2, aire_y // 2, aire_x // 2 + 8,
+                          alto - aire_y // 2], fill=acento)
+    else:             # pastilla: la caja ligera del canal
+        dibujo.rounded_rectangle([0, 0, ancho, alto], radius=18, fill=velo)
+    y = aire_y
+    for linea in lineas:
+        bbox = dibujo.textbbox((0, 0), linea, font=fuente)
+        x0 = (ancho - (bbox[2] - bbox[0])) // 2 - bbox[0]
+        if caja == "sombra":
+            sombra = tuple(max(0, c - 60) for c in tinta[:3]) + (170,)
+            dibujo.text((x0 + 3, y + 4), linea, font=fuente, fill=sombra)
+        dibujo.text((x0, y), linea, font=fuente, fill=tinta)
+        y += salto
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    imagen.save(destino)
+    return destino
+
+
+def _ventanas_trozos(trozos: list, duracion: float) -> list:
+    """[(texto, desde, dura)] — las ventanas saneadas de los trozos.
+
+    Pura (sin ffmpeg), para poder probar el ritmo sin renderizar: cada
+    trozo queda DENTRO del plano y con duración suficiente para que el
+    fundido no se coma el texto.
+    """
+    salida = []
+    for trozo in trozos or []:
+        if not isinstance(trozo, dict):
+            continue
+        texto = " ".join(str(trozo.get("texto") or "").split())
+        if not texto:
+            continue
+        desde = max(0.0, float(trozo.get("desde") or 0.0))
+        hasta = max(desde, float(trozo.get("hasta") or desde))
+        desde = min(desde, max(0.0, duracion - 0.3))
+        hasta = min(max(hasta, desde + 0.3), duracion)
+        if hasta - desde < 0.3:
+            continue
+        salida.append((texto, round(desde, 3), round(hasta - desde, 3)))
+    return salida
+
+
 def _cartela_png(plantilla: str, datos: dict | None, destino: Path,
                  paleta: dict | None = None) -> Path:
     """Una cartela completa (1920x1080): el plano entero ES texto.
@@ -210,14 +305,19 @@ def _cartela_png(plantilla: str, datos: dict | None, destino: Path,
 
 
 def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
-              rotulo: dict | None, destino: Path, calidad: str, trabajo,
+              trozos: list | None, destino: Path, calidad: str, trabajo,
               cfg_grafismo: dict | None = None) -> Path:
-    """Un segmento de vídeo: imagen animada + rótulo + su ventana de audio.
+    """Un segmento de vídeo: imagen animada + subtítulos + su audio.
 
     El plano lleva su ventana `t_in`/`t_out` DENTRO del audio de la
     escena (el corte de `segmentar`): el audio se corta a esa ventana y
     la imagen dura lo mismo. Los planos de CARTELA no traen imagen: el
-    plano entero es un PNG de texto, estático.
+    plano entero es un PNG de texto, estático — y no llevan subtítulo
+    (la cartela ES el texto).
+
+    Los TROZOS de subtítulo llegan en reloj del plano (los dejó p7 con
+    las marcas de la voz): cada uno es un PNG con su fundido, montado a
+    la banda del pie, quieto — fuera del zoom.
     """
     cfg = cfg_grafismo or {}
     audio = proyecto.ruta(escena["audio"])
@@ -276,30 +376,43 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
              "-loop", "1", "-t", f"{duracion:.3f}", "-i", str(imagen),
              "-ss", f"{t_in:.3f}", "-t", f"{duracion:.3f}", "-i", str(audio)]
     base = f"[0:v]{','.join(filtros)}"
-    if rotulo:
-        png = _rotulo_png(rotulo["texto"],
-                          destino.parent / f"{plano['id']}_rotulo.png",
-                          diseno=cfg.get("diseno", "pastilla"),
-                          paleta=cfg.get("paleta"),
-                          tam=cfg.get("tam", "normal"))
-        aparece = float(rotulo.get("aparece", 0.0))
-        dura = float(rotulo.get("dura", 4.0))
-        dura = min(dura, max(0.8, duracion - aparece))
-        fundido = min(0.35, dura / 3)
-        orden += ["-loop", "1", "-t", f"{dura:.3f}", "-i", str(png)]
-        grafo = (
-            f"{base}[base];"
-            f"[1:v]format=rgba,"
-            f"fade=t=in:st=0:d={fundido:.2f}:alpha=1,"
-            f"fade=t=out:st={dura - fundido:.2f}:d={fundido:.2f}:alpha=1,"
-            f"setpts=PTS+{aparece:.2f}/TB[r];"
-            f"[base][r]overlay=x=(W-w)/2:y=H-h-90:shortest=0[v]")
-        indice_audio = "2:a"
+    ventanas = _ventanas_trozos(trozos or [], duracion)
+    if ventanas:
+        # un PNG por trozo, encadenados sobre la banda del pie; el audio
+        # es SIEMPRE la entrada 1 (los PNGs entran detrás)
+        partes, previo, entrada = [], "[base]", 2
+        for k, (texto, desde, dura) in enumerate(ventanas):
+            png = _subtitulo_png(
+                texto, destino.parent / f"{plano['id']}_sub{k + 1}.png",
+                paleta=cfg.get("paleta"), tam=cfg.get("tam", "normal"),
+                diseno=cfg.get("diseno", "pastilla"))
+            if png is None:
+                continue
+            orden += ["-loop", "1", "-t", f"{dura:.3f}", "-i", str(png)]
+            entra = min(SUB_ENTRADA, dura / 3)
+            sale = min(SUB_SALIDA, dura / 3)
+            partes.append(
+                f"[{entrada}:v]format=rgba,"
+                f"fade=t=in:st=0:d={entra:.2f}:alpha=1,"
+                f"fade=t=out:st={dura - sale:.2f}:d={sale:.2f}:alpha=1,"
+                f"setpts=PTS+{desde:.3f}/TB[s{k}];"
+                f"{previo}[s{k}]overlay=x=(W-w)/2:y=H-h-{SUB_MARGEN}"
+                f":shortest=0[o{k}]")
+            previo = f"[o{k}]"
+            entrada += 1
+        if partes:
+            grafo = f"{base}[base];" + ";".join(partes)
+            etiqueta_salida = previo
+        else:
+            grafo = f"{base}[v]"
+            etiqueta_salida = "[v]"
+        indice_audio = "1:a"
     else:
         grafo = f"{base}[v]"
+        etiqueta_salida = "[v]"
         indice_audio = "1:a"
     orden += ["-filter_complex", grafo,
-              "-map", "[v]", "-map", indice_audio,
+              "-map", etiqueta_salida, "-map", indice_audio,
               "-c:v", "libx264", "-preset", ajustes["preset"],
               "-crf", ajustes["crf"], "-pix_fmt", "yuv420p",
               "-c:a", "aac", "-b:a", "192k",
@@ -493,20 +606,11 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     for p in planos:
         p.setdefault("id", p.get("escena", ""))
         p.setdefault("escena", p["id"])
-    # EL RÓTULO VA AL PLANO QUE CONTIENE SU INSTANTE: el rótulo vive en
-    # tiempo de ESCENA y el plano en su ventana de dentro
-    rotulos_de = {}
-    for r in callouts.get("rotulos", []):
-        sid = str(r.get("id") or "")
-        del_escena = [p for p in planos if p["escena"] == sid]
-        if not del_escena:
-            continue
-        aparece = max(0.0, float(r.get("aparece") or 0.0))
-        elegido = next((p for p in del_escena
-                        if float(p.get("t_out") or 0.0) > aparece),
-                       del_escena[-1])
-        local = max(0.0, aparece - float(elegido.get("t_in") or 0.0))
-        rotulos_de[elegido["id"]] = {**r, "aparece": round(local, 2)}
+    # LOS TROZOS DE SUBTÍTULO van por plano y en reloj de plano: no hay
+    # nada que recolocar — los dejó p7 con las marcas de la voz
+    subs_de = {str(f.get("id")): f.get("trozos") or []
+               for f in callouts.get("subtitulos", [])
+               if isinstance(f, dict)}
     # el grafismo del vídeo, ESCRITO en los datos de callouts al generarse:
     # el render no relee params de otro paso (una vista vieja tiene que
     # poder reproducir qué diseño dibujó)
@@ -531,7 +635,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
         trabajo.avance(f"renderizando {indice}/{len(planos)}: "
                        f"{plano['id']} ({round(dur, 1)} s)")
         destino = temporal / f"{indice:04d}_{plano['id']}.mp4"
-        _segmento(proyecto, plano, escena, rotulos_de.get(plano["id"]),
+        _segmento(proyecto, plano, escena, subs_de.get(plano["id"]),
                   destino, calidad, trabajo, cfg_grafismo)
         segmentos.append(destino)
         sids.append(plano["id"])

@@ -169,6 +169,72 @@ def svg_rotulo(texto: str, diseno: str = "pastilla", paleta: dict | None = None,
     return "".join(partes)
 
 
+def svg_subtitulo(texto: str, diseno: str = "pastilla",
+                  paleta: dict | None = None, tam: float = 1.0,
+                  ancho: int = 1600, cap_linea: int = 38) -> str:
+    """Un TROZO de subtítulo como SVG: lo MISMO que dibuja el render.
+
+    La caja es UNA por trozo (dos cajas de anchos distintos apiladas
+    dibujan un escalón) y las líneas salen PAREJAS, como
+    `pasos.subtitulos.dos_lineas` — aquí aproximado por caracteres,
+    que el vector no sabe medir con la fuente del render.
+    """
+    paleta = paleta or dict(PALETA_DEFECTO)
+    caja = SETS_DISENO.get(diseno, SETS_DISENO["pastilla"])["caja"]
+    escala = tamano_de(tam)
+    fuente = 52 * escala
+    cap = max(10, round(cap_linea))
+    texto = " ".join(str(texto or "").split())
+    lineas = [texto]
+    if len(texto) > cap and " " in texto:
+        palabras = texto.split()
+        mejor, dif = None, None
+        for corte in range(1, len(palabras)):
+            arriba = len(" ".join(palabras[:corte]))
+            abajo = len(" ".join(palabras[corte:]))
+            distancia = abs(arriba - abajo) \
+                + 4 * (max(0, arriba - cap) + max(0, abajo - cap))
+            if dif is None or distancia < dif:
+                dif, mejor = distancia, corte
+        lineas = [" ".join(palabras[:mejor]), " ".join(palabras[mejor:])]
+    salto = int(fuente * 1.28)
+    aire_x, aire_y = int(fuente * 0.62), int(fuente * 0.24)
+    ancho_texto = min(ancho - 2 * aire_x - 40,
+                      int(0.56 * fuente * max(len(l) for l in lineas)))
+    alto = 2 * aire_y + salto * (len(lineas) - 1) + int(fuente * 1.25)
+    partes = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{ancho}" '
+              f'height="{alto}" viewBox="0 0 {ancho} {alto}">']
+    if caja == "sombra":
+        partes.append('<filter id="s"><feDropShadow dx="0" dy="2" '
+                      'stdDeviation="4" flood-opacity="0.7"/></filter>')
+    elif caja == "pleno":
+        partes.append(f'<rect x="0" y="0" width="{ancho}" height="{alto}" '
+                      f'fill="{paleta["velo"]}"/>'
+                      f'<rect x="0" y="0" width="14" height="{alto}" '
+                      f'fill="{paleta["acento"]}"/>')
+    else:
+        x0 = (ancho - ancho_texto) / 2
+        partes.append(
+            f'<rect x="{x0 - aire_x}" y="0" width="{ancho_texto + 2 * aire_x}" '
+            f'height="{alto}" rx="{18 if caja == "pastilla" else 4}" '
+            f'fill="{paleta["velo"]}"/>')
+        if caja == "barra":
+            partes.append(f'<rect x="{x0 - aire_x + aire_x // 4}" '
+                          f'y="{alto // 4}" width="8" height="{alto // 2}" '
+                          f'fill="{paleta["acento"]}"/>')
+    filtro = ' filter="url(#s)"' if caja == "sombra" else ""
+    y = aire_y + fuente
+    for linea in lineas:
+        partes.append(
+            f'<text x="{ancho / 2}" y="{y}" text-anchor="middle"'
+            f'{filtro} font-family="Arial, Helvetica, sans-serif" '
+            f'font-weight="600" font-size="{fuente:.0f}" '
+            f'fill="{paleta["texto"]}">{_escapar(linea)}</text>')
+        y += salto
+    partes.append("</svg>")
+    return "".join(partes)
+
+
 def svg_cartela(plantilla: str, datos: dict | None, paleta: dict | None = None,
                 duracion: float = 4.0) -> str:
     """Una cartela completa (1920×1080): el plano que no se paga.

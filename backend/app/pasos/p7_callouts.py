@@ -1,125 +1,132 @@
-"""Paso 7 — callouts: rótulos y acentos sobre el vídeo.
+"""Paso 7 — callouts: los subtítulos de la narración, trozo a trozo.
 
-UNA llamada de LLM (rol "titulos") que, por escena, pule el texto en
-pantalla y decide si lleva acento destacado. Cada rótulo hereda su ventana
-temporal de las MARCAS DE PALABRA de la voz: aparece cuando la narración
-llega a su idea y se va antes de estorbar.
+Puerto del original: aquí NO hay ninguna llamada de modelo. Un
+subtítulo no destila la narración — LA ES — así que lo único que hay
+que calcular es qué dice y cuándo, y eso sale de las MARCAS DE PALABRA
+de la voz (`pasos/subtitulos.py`): el trozo entra cuando se dice lo
+que escribe y se va justo antes de estorbar.
 
-La unidad sigue siendo la escena.
+La unidad sigue siendo la ESCENA (el texto corregido a mano vive en
+`params.unidades[SXXX].subtitulo_texto`), pero los TROZOS son por
+PLANO: cada plano aporta su `narracion` y sus marcas rebanadas, y sus
+subtítulos viven en el reloj del plano (el mismo que el zoom y los
+cortes).
+
+SIN SUBTÍTULO ANTES QUE CON UNO DESCUADRADO: un plano de cartela no
+lleva (la cartela ES el texto, a tamaño de titular — dos textos
+compitiendo por la misma atención), una voz sin marcas de palabra no
+lleva (voz vieja o cata sin alineación), y una escena cuyas palabras
+no reproducen la narración de sus planos tampoco: un subtítulo medio
+segundo por detrás de la voz se lee peor que no tenerlo.
 """
 from __future__ import annotations
 
+from ..config import AJUSTES
 from ..nucleo import grafismo
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief
-from ..motores import llm
+from . import comun, p2_brief, subtitulos
 
-SISTEMA = """Eres editor de rótulos de vídeo en español. Por cada escena
-recibes su narración, su rótulo propuesto y las marcas de tiempo por
-palabra. Devuelves por escena UN rótulo de 2 a 5 palabras y el instante
-(en segundos, dentro de la duración de esa escena) en que debe aparecer.
-
-Reglas: sin puntos finales, sin gritar en mayúsculas, el rótulo nombra la
-idea clave. Si la escena no aporta idea mostrable, rótulo vacío "".
-Responde SOLO JSON: {"rotulos": [{"id": "S001", "texto": str,
-"aparece": float}, ...]}"""
+#: La banda del subtítulo: el pie del cuadro de salida, quieta.
+SUB_MARGEN = 72
+SUB_ANCHO = 1400
 
 
 def params_defecto() -> dict:
-    return {"duracion_max": 4.0, "diseno": "pastilla",
-            "paleta": {"fijados": {}}, "subtitulo_tam": "normal"}
+    return {"diseno": "pastilla", "paleta": {"fijados": {}},
+            "subtitulo_tam": "normal"}
 
 
 def estimar(params: dict) -> dict:
-    return {"llamadas_llm": 1, "imagenes": 0, "caracteres_voz": 0,
-            "coste": None}
+    # aritmética de texto y tiempo: ni modelo ni imágenes
+    return {"llamadas_llm": 0, "imagenes": 0, "caracteres_voz": 0,
+            "coste": 0.0}
+
+
+def cap_linea_de(subtitulo_tam) -> int:
+    """Caracteres por línea para ESTE cuerpo: `subtitulos.CAP_LINEA`
+    (38) está medido para el tamaño normal; con el grande caben menos."""
+    escala = grafismo.tamano_de(subtitulo_tam)
+    return max(12, round(subtitulos.CAP_LINEA / max(0.5, escala)))
 
 
 def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
-    guion = p2_brief.proyecto_leer_datos(proyecto, "guion")
     voz = p2_brief.proyecto_leer_datos(proyecto, "voz")
-    if not voz.get("escenas") or not guion.get("escenas"):
-        raise ValueError("falta guion o voz: genera primero los pasos previos")
-    trabajo.avance("escribiendo rotulos")
-    vinetas = []
-    palabras_de = {p["id"]: p.get("palabras", []) for p in voz["escenas"]}
-    duracion_de = {p["id"]: p["duracion"] for p in voz["escenas"]}
+    assets = p2_brief.proyecto_leer_datos(proyecto, "assets")
+    if not voz.get("escenas") or not assets.get("planos"):
+        raise ValueError("falta voz o assets: genera primero los pasos "
+                         "previos")
+    planos_de: dict[str, list] = {}
+    for p in assets.get("planos", []):
+        if isinstance(p, dict) and p.get("escena"):
+            planos_de.setdefault(str(p["escena"]), []).append(p)
     unidades = params.get("unidades") or {}
-    for escena in guion["escenas"]:
-        palabras = palabras_de.get(escena["id"], [])
-        # resumen de marcas: primer/ultimo tercio, sin volcar todo
-        marcas = ([(w["palabra"], w["inicio"], w["fin"]) for w in palabras]
-                  [:60])
-        ficha_u = unidades.get(escena["id"]) or {}
-        # LO CORREGIDO A MANO VA CON LA VIÑETA: el historial de feedback
-        # de la escena (capturas, repaso) es lo que este rótulo ya hizo
-        # mal; sin él, re-decidir repetiría el error.
-        correcciones = [" ".join(str(n.get("texto") or "").split())
-                        for n in (ficha_u.get("feedback") or [])
-                        if isinstance(n, dict) and n.get("texto")]
-        vinetas.append({
-            "id": escena["id"],
-            "titulo": escena.get("titulo", ""),
-            "narracion": escena["narracion"],
-            "propuesta": escena.get("texto_pantalla", ""),
-            "duracion": duracion_de.get(escena["id"], 0),
-            "palabras": marcas,
-            **({"correcciones": correcciones} if correcciones else {}),
-        })
-    llamada = llm.rol_config("titulos", comun.ajustes_llm())
-    llamada.sistema = SISTEMA
-    llamada.instruccion = _a_json(vinetas)
-    llamada.contexto = "callouts"
-    llamada.proyecto = proyecto.id
-    respuesta = llm.llamar_json(llamada, claves=comun.claves_actuales())
-    propuestas = (respuesta.get("rotulos", [])
-                  if isinstance(respuesta, dict) else respuesta)
-    rotulos = []
-    duracion_max = float(params.get("duracion_max", 4.0))
-    for item in propuestas:
-        escena_id = comun.limpiar_id(item.get("id", ""))
-        texto = comun.normalizar_texto(item.get("texto", ""))[:60]
-        if not texto:
+    cap_linea = cap_linea_de(params.get("subtitulo_tam", "normal"))
+    idioma = str(proyecto.leer().get("idioma", "es"))
+    filas, con_texto = [], 0
+    for escena in voz["escenas"]:
+        sid = str(escena.get("id") or "")
+        palabras = [w for w in (escena.get("palabras") or [])
+                    if isinstance(w, dict) and "inicio" in w]
+        del_escena = planos_de.get(sid) or []
+        if not palabras or not del_escena:
+            continue          # voz sin marcas: como siempre, sin subtítulo
+        # las marcas de la voz, REBANADAS por plano: la narración de los
+        # planos tiene que ser exactamente sus palabras (la guarda del
+        # módulo — sin emparejar no hay subtítulo, no uno descuadrado)
+        cursor, planos_con_marcas, cuadra = 0, [], True
+        for plano in del_escena:
+            if plano.get("cartela"):
+                continue      # la cartela ES el texto de este plano
+            texto = str(plano.get("narracion") or "")
+            dichas = texto.split()
+            ventana = palabras[cursor:cursor + len(dichas)]
+            if (not dichas or len(ventana) != len(dichas)
+                    or [subtitulos.normalizar_texto(w.get("palabra"))
+                        for w in ventana]
+                    != [subtitulos.normalizar_texto(t) for t in dichas]):
+                cuadra = False
+                break
+            planos_con_marcas.append({
+                **plano,
+                "marcas": [[w.get("inicio"), w.get("fin")]
+                           for w in ventana],
+            })
+            cursor += len(dichas)
+        if not cuadra or cursor != len(palabras):
             continue
-        # EL TEXTO CORREGIDO A MANO MANDA: el repaso guarda por unidad lo
-        # que el rótulo debe decir (`subtitulo_texto`) y se aplica
-        # DESPUÉS del modelo, conservando la ventana que la voz dictó.
-        manual = " ".join(str((unidades.get(escena_id) or {})
+        # EL TEXTO CORREGIDO A MANO MANDA, y se reparte SIN TOCAR LOS
+        # TIEMPOS (`repartir_escrito`): corregir una palabra escrita no
+        # puede volver a trocear, o habría que repartir los tiempos a ojo
+        manual = " ".join(str((unidades.get(sid) or {})
                               .get("subtitulo_texto") or "").split())
+        trozos_de_plano = [
+            subtitulos.de_escena(plano, cap_linea=cap_linea, idioma=idioma)
+            for plano in planos_con_marcas]
         if manual:
-            texto = manual[:60]
-        try:
-            aparece = max(0.0, float(item.get("aparece", 0.0)))
-        except (TypeError, ValueError):
-            aparece = 0.0
-        total_escena = duracion_de.get(escena_id, aparece + duracion_max)
-        # el rotulo no puede empezar tan tarde que no se ve
-        aparece = min(aparece, max(0.0, total_escena - 1.0))
-        rotulos.append({"id": escena_id, "texto": texto,
-                        "aparece": round(aparece, 2),
-                        "dura": duracion_max})
-    # una escena SIN propuesta pero CON texto corregido a mano también
-    # lleva rótulo: la corrección no puede depender de que el modelo la
-    # proponga otra vez
-    con_manual = {sid for sid, ficha in unidades.items()
-                  if isinstance(ficha, dict) and ficha.get("subtitulo_texto")}
-    for sid in sorted(con_manual):
-        if any(r["id"] == sid for r in rotulos):
-            continue
-        manual = " ".join(str(unidades[sid].get("subtitulo_texto") or "").split())
-        if not manual or sid not in duracion_de:
-            continue
-        rotulos.append({"id": sid, "texto": manual[:60],
-                        "aparece": 0.0, "dura": duracion_max})
-    rotulos.sort(key=lambda r: r["id"])
-    trabajo.avance(f"{len(rotulos)} rotulos colocados")
+            dibujados = [t["texto"] for trozos in trozos_de_plano
+                         for t in trozos]
+            repartidos = iter(subtitulos.repartir_escrito(dibujados, manual))
+            trozos_de_plano = [
+                [{**t, "texto": texto} for t, texto in zip(trozos, repartidos)
+                 if texto]
+                for trozos in trozos_de_plano]
+        for plano, trozos in zip(planos_con_marcas, trozos_de_plano):
+            if not trozos:
+                continue
+            con_texto += 1
+            filas.append({"id": str(plano.get("id") or sid),
+                          "escena": sid, "trozos": trozos})
+    trozos_total = sum(len(f["trozos"]) for f in filas)
+    trabajo.avance(f"{trozos_total} trozos de subtítulo en {con_texto} "
+                   f"plano(s) · hasta {cap_linea} caracteres por línea")
     # El grafismo usado queda ESCRITO en los datos: el render no relee
     # params (los suyos son de otro paso), y una vista vieja tiene que
     # poder reproducir qué diseño la dibujó.
     diseno = str(params.get("diseno", "pastilla"))
     if diseno not in grafismo.SETS_DISENO:
         diseno = "pastilla"
-    return {"rotulos": rotulos, "diseno": diseno,
+    return {"subtitulos": filas, "diseno": diseno,
+            "cap_linea": cap_linea,
             "paleta": grafismo.paleta_de(_estilo_del_canal(),
                                          (params.get("paleta") or {})
                                          .get("fijados")),
@@ -130,14 +137,8 @@ def _estilo_del_canal() -> str:
     """La guía del canal para derivar la paleta: la MISMA que siembra
     los pasos, leída del ajuste global (no params de otro paso)."""
     try:
-        from ..config import AJUSTES
         from ..nucleo import estilo as modulo_estilo
         return str(modulo_estilo.leer(AJUSTES.datos)
                    .get("estilo_grafico", ""))
     except Exception:                                  # noqa: BLE001
         return ""
-
-
-def _a_json(valor) -> str:
-    import json
-    return json.dumps(valor, ensure_ascii=False)

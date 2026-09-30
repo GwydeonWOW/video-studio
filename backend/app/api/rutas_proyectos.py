@@ -542,14 +542,16 @@ def leer_previsualizacion(pid: str) -> dict:
     for p in assets.get("planos", []):
         if isinstance(p, dict) and p.get("escena"):
             planos_de.setdefault(str(p["escena"]), []).append(p)
-    rotulos_de = {r.get("id"): r for r in callouts.get("rotulos", [])}
+    # los TROZOS de subtítulo van por plano y en reloj de plano (los dejó
+    # p7): aquí no hay nada que recolocar
+    subs_de = {str(f.get("id")): f.get("trozos") or []
+               for f in callouts.get("subtitulos", [])
+               if isinstance(f, dict)}
     escenas = []
     for escena in voz["escenas"]:
         sid = str(escena.get("id") or "")
         duracion_voz = float(escena.get("duracion") or 0.0)
         del_escena = planos_de.get(sid) or [{}]
-        rotulo = rotulos_de.get(sid)
-        aparece = max(0.0, float((rotulo or {}).get("aparece") or 0.0))
         for plano in del_escena:
             # la ventana del plano DENTRO del audio de la escena; los
             # planos viejos (una imagen por escena) no la traen
@@ -559,15 +561,6 @@ def leer_previsualizacion(pid: str) -> dict:
             imagen = plano.get("imagen")
             if not imagen or not proyecto.ruta(str(imagen)).exists():
                 imagen = None
-            # el rótulo viaja con el plano que CONTIENE su instante (la
-            # misma cuenta que el render), en reloj del plano
-            rotulo_de_plano = None
-            if rotulo and (t_out > aparece or plano is del_escena[-1]):
-                rotulo_de_plano = {
-                    "texto": str(rotulo.get("texto", "")),
-                    "aparece": round(max(0.0, aparece - t_in), 2),
-                    "dura": round(float(rotulo.get("dura", 4.0)), 2)}
-                rotulo = None          # sólo el primer plano que lo pille
             palabras = [w for w in (escena.get("palabras") or [])
                         if isinstance(w, dict)
                         and float(w.get("fin") or 0) > t_in
@@ -587,14 +580,14 @@ def leer_previsualizacion(pid: str) -> dict:
                 "duracion": round(max(0.1, min(t_out, duracion_voz or t_out)
                                        - t_in), 3),
                 "palabras": palabras,
-                "rotulo": rotulo_de_plano,
+                "trozos": subs_de.get(str(plano.get("id") or sid)) or [],
             })
     render_params = estado.paso("render").get("params") or {}
     return {
         "escenas": escenas,
         "duracion": round(sum(e["duracion"] for e in escenas), 2),
         "resolucion": str(render_params.get("resolucion", "1920x1080")),
-        "con_rotulos": bool(callouts.get("rotulos")),
+        "con_subtitulos": bool(callouts.get("subtitulos")),
         "montado": proyecto.ruta("pasos/render/final.mp4").exists(),
         "idioma": str(proyecto.leer().get("idioma", "es")),
     }
@@ -1580,26 +1573,29 @@ def guardar_diseno(pid: str, cuerpo: dict) -> dict:
 @router.get("/{pid}/callouts/vista", dependencies=[_SESION])
 def vista_callout(pid: str, plano: str, diseno: str | None = None,
                   tam: str | None = None, texto: str | None = None) -> Response:
-    """El rótulo de un plano como SVG: lo que dibuja el render.
+    """Un trozo de subtítulo como SVG: lo que dibuja el render.
 
     Los query params opcionales son la VISTA PREVIA de lo que la pantalla
-    está editando (aún sin guardar): sin ellos se enseña lo guardado.
+    está editando (aún sin guardar): sin ellos se enseña el primer trozo
+    guardado del plano.
     """
     proyecto = _proyecto_o_404(pid)
     estado = Estado(proyecto)
     datos = estado.datos_de("callouts") or {}
     params = estado.paso("callouts").get("params", {})
     sid = str(plano).strip().upper()
-    rotulo = next((r for r in datos.get("rotulos", [])
-                   if str(r.get("id", "")).upper() == sid), None)
-    if not rotulo and texto is None:
-        raise HTTPException(404, f"el plano {plano} no lleva rótulo")
-    svg = grafismo.svg_rotulo(
-        texto if texto is not None else rotulo.get("texto", ""),
+    fila = next((f for f in datos.get("subtitulos", [])
+                 if str(f.get("id", "")).upper() == sid), None)
+    trozo = (fila.get("trozos") or [{}])[0].get("texto", "") if fila else ""
+    if not trozo and texto is None:
+        raise HTTPException(404, f"el plano {plano} no lleva subtítulo")
+    svg = grafismo.svg_subtitulo(
+        texto if texto is not None else trozo,
         diseno or datos.get("diseno") or params.get("diseno", "pastilla"),
         _paleta_actual(estado),
         tam or datos.get("subtitulo_tam")
-        or params.get("subtitulo_tam", "normal"))
+        or params.get("subtitulo_tam", "normal"),
+        cap_linea=int(datos.get("cap_linea") or 38))
     return Response(content=svg, media_type="image/svg+xml")
 
 
@@ -1642,16 +1638,27 @@ def _tiempos_de(proyecto: Proyecto) -> list[dict]:
 
 
 def _planos_del_repaso(proyecto: Proyecto) -> dict:
-    """{plano: {cartela, texto_rotulo}} — el contexto de cada nota."""
+    """{plano: {cartela, texto_rotulo}} — el contexto de cada nota.
+
+    El texto que viaja es el de los SUBTÍTULOS (lo que de verdad se
+    escribe en pantalla ahora), juntado por escena.
+    """
     assets = p2_brief.proyecto_leer_datos(proyecto, "assets") or {}
     callouts = p2_brief.proyecto_leer_datos(proyecto, "callouts") or {}
     cartela_de = {str(p.get("escena")): p.get("cartela")
                   for p in assets.get("planos", []) if isinstance(p, dict)}
-    rotulo_de = {str(r.get("id")): r.get("texto")
-                 for r in callouts.get("rotulos", []) if isinstance(r, dict)}
+    texto_de: dict[str, str] = {}
+    for fila in callouts.get("subtitulos", []):
+        if not isinstance(fila, dict):
+            continue
+        trozos = " ".join(str(t.get("texto") or "")
+                          for t in (fila.get("trozos") or [])
+                          if isinstance(t, dict)).strip()
+        if trozos:
+            texto_de[str(fila.get("escena"))] = trozos
     return {sid: {"cartela": cartela_de.get(sid) or {},
-                  "texto_rotulo": rotulo_de.get(sid) or ""}
-            for sid in set(cartela_de) | set(rotulo_de)}
+                  "texto_rotulo": texto_de.get(sid, "")}
+            for sid in set(cartela_de) | set(texto_de)}
 
 
 def _ficha_repaso(proyecto: Proyecto) -> dict:
