@@ -48,6 +48,25 @@ def estimar(params: dict) -> dict:
             "coste": None}
 
 
+def formato_de_salida(proyecto: Proyecto) -> str:
+    """El porte del vídeo («horizontal» | «vertical»), del único sitio
+    donde vive la decisión: el brief. Primero sus datos (ya ejecutado,
+    `formato_salida` es lo que dejó correr el paso) y, si no ha corrido,
+    sus params guardados. Un proyecto anterior al mando —o sin él— es
+    horizontal, que es lo que hubo siempre.
+
+    Todos los pasos que necesitan el cuadro (p6 pide las imágenes al
+    tamaño justo, p8 monta el MP4) pasan por aquí: la decisión no se
+    recalcula en ninguno otro sitio.
+    """
+    brief = p2_brief.proyecto_leer_datos(proyecto, "brief")
+    if brief.get("formato_salida"):
+        return comun.normalizar_formato(brief["formato_salida"])
+    from ..nucleo.estado import Estado
+    params = (Estado(proyecto).paso("brief") or {}).get("params") or {}
+    return comun.normalizar_formato(params.get("formato"))
+
+
 def ejecutar(proyecto: Proyecto, params: dict, trabajo,
              solo_escenas: list | None = None) -> dict:
     guion = p2_brief.proyecto_leer_datos(proyecto, "guion")

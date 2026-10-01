@@ -498,8 +498,43 @@ def dos_lineas(texto, medir, ancho_max):
     return [" ".join(palabras[:mejor]), " ".join(palabras[mejor:])]
 
 
+#: CUÁNTO CRECE EL SUBTÍTULO EN VERTICAL, como mucho. El cuerpo (52 px)
+#: está pensado para 1080 de alto; en un 1080x1920 que se ve en un
+#: móvil, 52 px son la mitad de alto relativo y se leen pequeños. Se
+#: escala con el alto del cuadro (1920/1080 = 1,78) con este techo: a
+#: 1,78 el subtítulo se comía dos renglones de un tercio de pantalla.
+ESCALA_VERTICAL_MAX = 1.35
+
+#: EN VERTICAL EL SUBTÍTULO VA A UN TERCIO DE LA PANTALLA desde abajo,
+#: no al pie: en un móvil el pie lo tapan los controles y la mirada
+#: está en el centro. Es la fracción del alto que queda por debajo de
+#: la línea base.
+ALTURA_VERTICAL = 1.0 / 3.0
+
+
+def es_vertical(salida=None) -> bool:
+    """¿El cuadro de salida es más alto que ancho?"""
+    return bool(salida) and len(salida) >= 2 \
+        and float(salida[1] or 0) > float(salida[0] or 0)
+
+
+def escala_subtitulo(salida=None) -> float:
+    """Por cuánto se multiplica el cuerpo del subtítulo en ESTA salida.
+
+    En vertical el mismo «normal» es más grande, porque la pantalla es
+    más alta que ancha (con techo). Quien trocea (`p7.cap_linea_de`) y
+    quien dibuja (`p8._subtitulo_png`) tienen que usar ESTA misma
+    cuenta: una línea de 38 caracteres calibrada para el cuerpo de
+    siempre no cabe en la banda vertical con el cuerpo crecido.
+    """
+    if not es_vertical(salida):
+        return 1.0
+    return round(min(ESCALA_VERTICAL_MAX, float(salida[1]) / 1080.0), 2)
+
+
 def banda_fija(ancho=1920, alto=1080, margen=72, ancho_maximo=1400):
-    """Dónde va el subtítulo: EL PIE DEL CUADRO DE SALIDA.
+    """Dónde va el subtítulo: EL PIE DEL CUADRO DE SALIDA — o, en
+    vertical, a un tercio de la pantalla (ver `ALTURA_VERTICAL`).
 
     Tres números y ninguna cuenta. El subtítulo vive en el cuadro de
     salida, FUERA del zoom, y ahí no se mueve nada: la deriva es cero
@@ -508,7 +543,14 @@ def banda_fija(ancho=1920, alto=1080, margen=72, ancho_maximo=1400):
     del cuadro de salida se sale de la imagen en cuanto el zoom entra.
     """
     ancho, alto = float(ancho), float(alto)
-    return {"suelo": round(alto - float(margen), 1),
-            "centro": round(ancho / 2.0, 1),
-            "ancho": round(min(float(ancho_maximo), ancho - 2 * float(margen)),
-                           1)}
+    banda = {"suelo": round(alto - float(margen), 1),
+             "centro": round(ancho / 2.0, 1),
+             "ancho": round(min(float(ancho_maximo), ancho - 2 * float(margen)),
+                            1)}
+    if es_vertical((ancho, alto)):
+        # solo sube el SUELO: el margen lateral (y con él el ancho de
+        # la banda) es el de siempre. Pasarle un tercio del alto como
+        # margen dejaría la banda con ancho negativo y partiría cada
+        # trozo en dos.
+        banda["suelo"] = round(alto * (1.0 - ALTURA_VERTICAL), 1)
+    return banda

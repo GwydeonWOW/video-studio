@@ -24,7 +24,7 @@ from __future__ import annotations
 from ..config import AJUSTES
 from ..nucleo import grafismo
 from ..nucleo.proyecto import Proyecto
-from . import comun, p2_brief, subtitulos
+from . import comun, p2_brief, p4_voz, subtitulos
 
 #: La banda del subtítulo: el pie del cuadro de salida, quieta.
 SUB_MARGEN = 72
@@ -58,11 +58,22 @@ def estimar(params: dict) -> dict:
             "coste": 0.0}
 
 
-def cap_linea_de(subtitulo_tam) -> int:
-    """Caracteres por línea para ESTE cuerpo: `subtitulos.CAP_LINEA`
-    (38) está medido para el tamaño normal; con el grande caben menos."""
-    escala = grafismo.tamano_de(subtitulo_tam)
-    return max(12, round(subtitulos.CAP_LINEA / max(0.5, escala)))
+def cap_linea_de(subtitulo_tam, salida=None) -> int:
+    """Caracteres por línea para ESTE cuerpo y ESTA salida.
+
+    `subtitulos.CAP_LINEA` (38) está medido para el cuerpo normal en
+    una banda de 1.400 px; con el grande caben menos. Y en vertical la
+    banda se estrecha a 936 y el cuerpo crece con la pantalla, así que
+    caben muchas menos: trocear con el tope horizontal daba renglones
+    que el render recortaba por los dos lados. Aquí salen ~19 por
+    línea en vertical — trozos más cortos y más grandes, que es lo que
+    se lee en un móvil.
+    """
+    escala = grafismo.tamano_de(subtitulo_tam) \
+        * subtitulos.escala_subtitulo(salida)
+    banda = subtitulos.banda_fija(*(salida or ()))["ancho"]
+    return max(12, round(subtitulos.CAP_LINEA * (banda / float(SUB_ANCHO))
+                         / max(0.5, escala)))
 
 
 def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
@@ -76,7 +87,16 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
         if isinstance(p, dict) and p.get("escena"):
             planos_de.setdefault(str(p["escena"]), []).append(p)
     unidades = params.get("unidades") or {}
-    cap_linea = cap_linea_de(params.get("subtitulo_tam", "normal"))
+    # el formato, por el MISMO camino que el render (`p8`): lo que dejó
+    # escrito assets manda, y si no ha corrido, lo que decidió el brief
+    salida = comun.ficha_formato(assets.get("formato")
+                                 or p4_voz.formato_de_salida(proyecto))["salida"]
+    cap_linea = cap_linea_de(params.get("subtitulo_tam", "normal"), salida)
+    # EN VERTICAL, UN RENGLÓN POR TROZO: se lee de un golpe y no tapa
+    # el plano (dos líneas en horizontal, como siempre). Un tope de
+    # trozo a una línea deja a `dos_lineas` el margen de partir lo que
+    # no quepa, midiéndolo de verdad.
+    cap_trozo = cap_linea if subtitulos.es_vertical(salida) else None
     idioma = str(proyecto.leer().get("idioma", "es"))
     filas, con_texto = [], 0
     for escena in voz["escenas"]:
@@ -119,7 +139,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
         manual = " ".join(str((unidades.get(sid) or {})
                               .get("subtitulo_texto") or "").split())
         trozos_de_plano = [
-            subtitulos.de_escena(plano, cap_linea=cap_linea, idioma=idioma)
+            subtitulos.de_escena(plano, cap_linea=cap_linea,
+                                 cap_trozo=cap_trozo, idioma=idioma)
             for plano in planos_con_marcas]
         if manual:
             dibujados = [t["texto"] for trozos in trozos_de_plano

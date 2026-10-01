@@ -385,6 +385,7 @@ function DialogoCrear({
   const [nombre, setNombre] = useState("")
   const [canal, setCanal] = useState("")
   const [idioma, setIdioma] = useState("es")
+  const [formato, setFormato] = useState("horizontal")
   const [enviando, setEnviando] = useState(false)
   const [estilo, setEstilo] = useState<EstiloCanal | null>(null)
 
@@ -404,6 +405,7 @@ function DialogoCrear({
         nombre,
         canal,
         idioma,
+        formato,
       })
       alCrear(ficha.id)
     } catch (err) {
@@ -465,6 +467,22 @@ function DialogoCrear({
                 </ContenidoSelector>
               </Selector>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Etiqueta>Formato</Etiqueta>
+            <Selector valor={formato} alCambiar={setFormato}>
+              <DisparadorSelector>
+                <ValorSelector />
+              </DisparadorSelector>
+              <ContenidoSelector>
+                <Opcion valor="horizontal">Horizontal 16:9</Opcion>
+                <Opcion valor="vertical">Vertical 9:16</Opcion>
+              </ContenidoSelector>
+            </Selector>
+            <p className="text-xs text-muted-foreground">
+              el porte del vídeo: decide el cuadro al que se piden las
+              imágenes y se monta el MP4
+            </p>
           </div>
           <div className="flex justify-end gap-2">
             <Boton tipo="button" variante="contorno" onClick={alCerrar}>

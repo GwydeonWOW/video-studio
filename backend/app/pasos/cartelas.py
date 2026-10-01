@@ -2395,10 +2395,15 @@ def fotograma(ficha, t=0.0, paleta=None, diseno=None, duracion=4.0, semilla=0,
     from PIL import Image, ImageDraw, ImageOps
 
     W, H = tamano or (1920, 1080)
-    sx, sy = W / float(TAMANO[0]), H / float(BANDA[3] - BANDA[1])
+    # la BANDA del lienzo 3:2 es exactamente 16:9, así que en horizontal
+    # llenar el cuadro y escalar uniforme dan lo mismo. En un cuadro de
+    # OTRAS proporciones (el 9:16 del vídeo vertical) estirar la banda
+    # para llenar deformaría las letras: se escala UNIFORME y se centra.
+    sx = sy = min(W / float(TAMANO[0]), H / float(BANDA[3] - BANDA[1]))
+    dy0 = (H - (BANDA[3] - BANDA[1]) * sy) / 2
 
     def T(x, y):
-        return (x * sx, (y - BANDA[1]) * sy)
+        return (x * sx, (y - BANDA[1]) * sy + dy0)
 
     plantilla, datos = _desmontar(ficha)
     colores = colores_de(paleta, plantilla)

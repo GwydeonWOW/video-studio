@@ -69,7 +69,8 @@ from ..config import AJUSTES
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
 from . import (cartelas as cartelas_motor, catalogo_visual, comun,
-               corrector, encuadres, guia_estilo, marcas_tts, p2_brief)
+               corrector, encuadres, guia_estilo, marcas_tts, p2_brief,
+               p4_voz)
 from ..motores import imagen_glm, reglas
 from ..motores.guion import segmentar
 
@@ -703,6 +704,12 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
     maximo = max(minimo + 0.5, float(params.get("planos_max_s") or 6.0))
     claves = comun.claves_actuales()
     calidad = params.get("calidad", "low")
+    # EL PORTE DEL VÍDEO decide el lienzo al que se pide cada imagen: un
+    # plano vertical se PIDE vertical (generacion 768x1344), no se
+    # recorta de uno apaisado. La decisión vive en el brief y solo se
+    # lee aquí y en p8 (regla del original: una sola puerta).
+    ficha_formato = comun.ficha_formato(p4_voz.formato_de_salida(proyecto))
+    vertical = bool(ficha_formato["vertical"])
     carpeta = proyecto.carpeta_paso("assets") / "imagenes"
 
     # FASE 1 — el corte (gratis): decidir los planos antes de pagar nada
@@ -825,8 +832,14 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
         encargo = prompt_de(escena, unidades, params,
                             carta=cartas.get(sid), frase=plano["narracion"],
                             idioma=idioma, correccion=corregido)
+        if vertical:
+            # la guía y las referencias de estilo vienen de vídeos
+            # apaisados: sin esta línea el generador compone un cuadro
+            # apaisado y el 9:16 se quedaría sin la mitad del plano
+            encargo += "\nVERTICAL 9:16 portrait video frame."
         imagen_glm.generar(
-            encargo, destino, calidad=calidad, claves=claves, estilo="")
+            encargo, destino, calidad=calidad, claves=claves, estilo="",
+            vertical=vertical)
         with cerrojo:
             anotar_operacion(
                 datos_dir=AJUSTES.datos, proyecto=proyecto.id,
@@ -890,6 +903,9 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
                    + (f" · media {informe['duracion_media']} s por plano"
                       if informe and "duracion_media" in informe else ""))
     return {"planos": planos, "calidad": calidad,
+            # con qué porte se pidieron las imágenes: p8 lo lee antes
+            # que nada de aquí abajo, y así la ficha del paso lo cuenta
+            "formato": ficha_formato["id"],
             "cartelas": len(con_cartela),
             **({"informe": informe} if informe else {}),
             "ritmo": {"minimo": minimo, "maximo": maximo},

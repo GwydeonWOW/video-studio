@@ -1472,9 +1472,23 @@ function DialogoVisor({
           </div>
         ) : (
           <div className="space-y-3">
+            {/* el cuadro de verdad del vídeo (16:9 o el 9:16 vertical),
+             * que la previsualización muestre el porte con el que se
+             * pidió cada imagen */}
+            {(() => {
+              const [cw, ch] = (datos.resolucion || "1920x1080")
+                .split("x")
+                .map((n) => Number(n) || 0)
+              const vertical_cuadro = ch > cw
+              return (
             <div
-              className="relative overflow-hidden rounded-md bg-black"
-              style={{ aspectRatio: "16 / 9" }}
+              className="relative mx-auto overflow-hidden rounded-md bg-black"
+              style={{
+                aspectRatio: cw && ch ? `${cw} / ${ch}` : "16 / 9",
+                ...(vertical_cuadro
+                  ? { maxWidth: "calc(70vh * 9 / 16)" }
+                  : {}),
+              }}
             >
               {escena.imagen ? (
                 <img
@@ -1503,6 +1517,8 @@ function DialogoVisor({
                 {indice + 1}/{datos.escenas.length} · {escena.id}
               </span>
             </div>
+              )
+            })()}
 
             <audio
               ref={audio_ref}

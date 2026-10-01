@@ -20,6 +20,13 @@ import { Boton } from "../../components/ui/button"
 import { Entrada } from "../../components/ui/input"
 import { Etiqueta } from "../../components/ui/etiqueta"
 import { AreaTexto } from "../../components/ui/textarea"
+import {
+  Selector,
+  DisparadorSelector,
+  ContenidoSelector,
+  Opcion,
+  ValorSelector,
+} from "../../components/ui/selector"
 
 /** Los params que el encargo sabe editar, tal como están GUARDADOS. */
 export interface ParamsEncargo {
@@ -147,6 +154,7 @@ export function PanelEncargo({
     texto: String(params.ingesta.texto ?? ""),
     tono: String(params.brief.tono ?? ""),
     duracion: String(params.guion.duracion_min ?? 10),
+    formato: String(params.brief.formato ?? "horizontal"),
   }))
   const [cta, setCta] = useState(() => ctaDelServidor(params.guion))
   // lo que hay en el servidor: la base sobre la que se fusiona cada
@@ -173,6 +181,11 @@ export function PanelEncargo({
         if (campos.texto !== String(base.texto ?? "")) base.texto = campos.texto
       } else if (paso === "brief") {
         if (campos.tono !== String(base.tono ?? "")) base.tono = campos.tono
+        // ?? "horizontal": sin la tecla guardada el campo nació en
+        // horizontal — dejarlo ahí no es un cambio; escribirlo sería
+        // sembrar el defecto (y mover la firma de lo ya pagado)
+        if (campos.formato !== String(base.formato ?? "horizontal"))
+          base.formato = campos.formato
       } else {
         const n = Number(campos.duracion)
         if (Number.isFinite(n) && n >= 1) base.duracion_min = Math.round(n)
@@ -189,7 +202,9 @@ export function PanelEncargo({
       if (paso === "ingesta")
         return campos.titulo !== String(b.titulo ?? "") ||
           campos.texto !== String(b.texto ?? "")
-      if (paso === "brief") return campos.tono !== String(b.tono ?? "")
+      if (paso === "brief")
+        return campos.tono !== String(b.tono ?? "") ||
+          campos.formato !== String(b.formato ?? "horizontal")
       const n = Number(campos.duracion)
       // ?? 10: si el servidor no trae duración, el campo nació en 10 —
       // dejarlo intacto no es un cambio; escribirlo sería sembrar el
@@ -276,7 +291,7 @@ export function PanelEncargo({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-3">
         <div className="space-y-2">
           <Etiqueta htmlFor="encargo-tono">Tono</Etiqueta>
           <Entrada
@@ -302,6 +317,25 @@ export function PanelEncargo({
           <p className="text-xs text-muted-foreground">
             duración aproximada del vídeo: el guion sale con las escenas
             que hagan falta para durarla
+          </p>
+        </div>
+        <div className="space-y-2">
+          <Etiqueta>Formato</Etiqueta>
+          <Selector
+            valor={campos.formato}
+            alCambiar={(v) => cambiar("formato", v)}
+          >
+            <DisparadorSelector>
+              <ValorSelector />
+            </DisparadorSelector>
+            <ContenidoSelector>
+              <Opcion valor="horizontal">Horizontal 16:9</Opcion>
+              <Opcion valor="vertical">Vertical 9:16</Opcion>
+            </ContenidoSelector>
+          </Selector>
+          <p className="text-xs text-muted-foreground">
+            el porte del vídeo; cambiarlo tras generar deja obsoletas las
+            imágenes y el montaje
           </p>
         </div>
       </div>

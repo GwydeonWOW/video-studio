@@ -138,6 +138,14 @@ const CAMPOS: Record<string, DescriptorCampo[]> = {
       opciones: ["es", "en"],
     },
     {
+      clave: "formato",
+      etiqueta: "Formato",
+      tipo: "selector",
+      opciones: ["horizontal", "vertical"],
+      ayuda:
+        "El porte del vídeo: el cuadro al que se piden las imágenes y se monta el MP4.",
+    },
+    {
       clave: "ritmo_min",
       etiqueta: "Segundos por escena (mín)",
       tipo: "numero",
@@ -255,12 +263,6 @@ const CAMPOS: Record<string, DescriptorCampo[]> = {
       etiqueta: "Calidad",
       tipo: "selector",
       opciones: ["borrador", "estandar", "detalle"],
-    },
-    {
-      clave: "resolucion",
-      etiqueta: "Resolución",
-      tipo: "selector",
-      opciones: ["1920x1080"],
     },
     { clave: "fps", etiqueta: "FPS", tipo: "numero", min: 10, max: 60 },
   ],

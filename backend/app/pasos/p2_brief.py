@@ -95,6 +95,13 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     except (TypeError, ValueError):
         ritmo_min, ritmo_max = 20, 40
     respuesta.setdefault("formato", {"min": ritmo_min, "max": ritmo_max})
+    # OJO al nombre: "formato" en los DATOS es la cadencia {min, max} que
+    # dicta el propio modelo. El porte del vídeo (horizontal | vertical) es
+    # un mando de quien crea el proyecto y viaja como param "formato" del
+    # brief; aquí se copia a "formato_salida" para que p4/p6/p8 puedan
+    # leerlo sin preguntarle a la cadencia. Un proyecto sin el mando es
+    # horizontal: normalizar_formato cae ahí con cualquier otra cosa.
+    respuesta["formato_salida"] = comun.normalizar_formato(params.get("formato"))
     trabajo.avance(f"brief listo: {len(respuesta['puntos'])} puntos, "
                    f"tono {respuesta.get('tono', '?')}")
     return respuesta

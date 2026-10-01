@@ -32,7 +32,8 @@ from pathlib import Path
 from ..config import AJUSTES
 from ..nucleo import grafismo
 from ..nucleo.proyecto import Proyecto
-from . import cartelas, comun, p2_brief, sonido, subtitulos, transiciones
+from . import (cartelas, comun, p2_brief, p4_voz, sonido, subtitulos,
+               transiciones)
 
 FPS = 30
 ANCHO, ALTO = 1920, 1080
@@ -103,12 +104,13 @@ def _fuente_de(tamano: int):
 
 def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400,
                 diseno: str = "pastilla", paleta: dict | None = None,
-                tam=1.0) -> Path:
+                tam=1.0, lienzo: int = ANCHO) -> Path:
     """Dibuja el rotulo con el SET DE DISENO y la paleta del vídeo.
 
     Es el mismo dibujo que grafismo.svg_rotulo (la pantalla ensena el
     SVG, el render paga el PNG): que difieran seria una pantalla que
-    miente.
+    miente. `lienzo` es el ancho del cuadro de SALIDA (el 9:16 vertical
+    centra sus rótulos en menos ancho).
     """
     from PIL import Image, ImageDraw
     from ..nucleo import grafismo
@@ -134,7 +136,8 @@ def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400,
         lineas.append(actual)
     alto_linea = tamano + 26
     margen = 30
-    imagen = Image.new("RGBA", (ANCHO, len(lineas) * alto_linea + 2 * margen),
+    imagen = Image.new("RGBA", (lienzo,
+                                len(lineas) * alto_linea + 2 * margen),
                        (0, 0, 0, 0))
     dibujo = ImageDraw.Draw(imagen)
     velo = _color(paleta.get("velo"))
@@ -144,7 +147,7 @@ def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400,
     for linea in lineas:
         bbox = dibujo.textbbox((0, 0), linea, font=fuente)
         ancho_linea = bbox[2] - bbox[0]
-        x0 = (ANCHO - ancho_linea) // 2
+        x0 = (lienzo - ancho_linea) // 2
         if caja == "pastilla":
             dibujo.rounded_rectangle(
                 [x0 - 28, y - 10, x0 + ancho_linea + 28, y + tamano + 14],
@@ -153,7 +156,7 @@ def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400,
             dibujo.rectangle([x0 - 28, y - 10, x0 - 20, y + tamano + 14],
                              fill=acento)
         elif caja == "pleno":
-            dibujo.rectangle([0, y - 10, ANCHO, y + tamano + 14], fill=velo)
+            dibujo.rectangle([0, y - 10, lienzo, y + tamano + 14], fill=velo)
             dibujo.rectangle([0, y - 10, 14, y + tamano + 14], fill=acento)
         else:  # sombra: sin caja, texto claro con sombra suave
             sombra = tuple(max(0, c - 60) for c in tinta[:3]) + (170,)
@@ -170,7 +173,8 @@ def _rotulo_png(texto: str, destino: Path, ancho_max: int = 1400,
 
 def _subtitulo_png(texto: str, destino: Path, paleta: dict | None = None,
                    tam: str = "normal", diseno: str = "pastilla",
-                   ancho_max: int = SUB_ANCHO) -> Path | None:
+                   ancho_max: int = SUB_ANCHO,
+                   lienzo: int = ANCHO, escala: float = 1.0) -> Path | None:
     """Un TROZO de subtítulo dibujado: una o dos líneas PAREJAS, en caja.
 
     El reparto de líneas lo decide `subtitulos.dos_lineas` midiendo con
@@ -180,13 +184,17 @@ def _subtitulo_png(texto: str, destino: Path, paleta: dict | None = None,
     y eso convierte un subtítulo en un cartel. El texto se ancla por
     abajo en el overlay (y=H-h-margen), así que un trozo de una línea y
     otro de dos acaban a la misma altura.
+
+    `escala` es la del formato (`subtitulos.escala_subtitulo`): en
+    vertical el cuerpo crece con la pantalla, y quien troceó contó con
+    ese cuerpo — dibujarlo más pequeño aquí partiría la calibración.
     """
     from PIL import Image, ImageDraw
     from ..nucleo import grafismo
     paleta = paleta or dict(grafismo.PALETA_DEFECTO)
     caja = grafismo.SETS_DISENO.get(diseno,
                                      grafismo.SETS_DISENO["pastilla"])["caja"]
-    tamano = int(52 * grafismo.tamano_de(tam))
+    tamano = int(52 * grafismo.tamano_de(tam) * escala)
     fuente = _fuente_de(tamano)
     prueba = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
 
@@ -199,7 +207,7 @@ def _subtitulo_png(texto: str, destino: Path, paleta: dict | None = None,
     salto = int(tamano * 1.28)
     aire_x, aire_y = int(tamano * 0.62), int(tamano * 0.24)
     ancho_texto = max(medir(linea) for linea in lineas)
-    ancho = ANCHO if caja == "pleno" else ancho_texto + 2 * aire_x
+    ancho = lienzo if caja == "pleno" else ancho_texto + 2 * aire_x
     alto = 2 * aire_y + salto * (len(lineas) - 1) + tamano + tamano // 4
     imagen = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
     dibujo = ImageDraw.Draw(imagen)
@@ -257,7 +265,9 @@ def _ventanas_trozos(trozos: list, duracion: float) -> list:
 
 def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
               trozos: list | None, destino: Path, calidad: str, trabajo,
-              cfg_grafismo: dict | None = None) -> Path:
+              cfg_grafismo: dict | None = None,
+              tamano: tuple | None = None,
+              sub_ancho: int = SUB_ANCHO) -> Path:
     """Un segmento de vídeo: imagen animada + subtítulos + su audio.
 
     El plano lleva su ventana `t_in`/`t_out` DENTRO del audio de la
@@ -270,7 +280,12 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
     Los TROZOS de subtítulo llegan en reloj del plano (los dejó p7 con
     las marcas de la voz): cada uno es un PNG con su fundido, montado a
     la banda del pie, quieto — fuera del zoom.
+
+    `tamano` es el cuadro de SALIDA (el 9:16 vertical monta sus planos
+    a 1080x1920) y `sub_ancho` el ancho de la banda del subtítulo en
+    ese cuadro.
     """
+    ancho, alto = tamano or (ANCHO, ALTO)
     cfg = cfg_grafismo or {}
     audio = proyecto.ruta(escena["audio"])
     t_in = max(0.0, float(plano.get("t_in") or 0.0))
@@ -295,7 +310,7 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
             fotogramas, cartela, duracion, fps=FPS,
             paleta=cfg.get("paleta"), semilla=_semilla_de(proyecto),
             tiempos=escritura.get("tiempos") or None,
-            base=base, zoom=par_zoom)
+            base=base, zoom=par_zoom, tamano=(ancho, alto))
         orden = [comun.ffmpeg(), "-y", "-loglevel", "error",
                  "-framerate", str(FPS), "-i",
                  str(fotogramas / "f%05d.png"),
@@ -332,9 +347,9 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
         zoom = f"'max({rampa},{min(de, hasta)})'"
     filtros = [
         # escalar de mas y encoger con zoompan: sin escalones
-        f"scale={ANCHO * 2}:{ALTO * 2}",
+        f"scale={ancho * 2}:{alto * 2}",
         f"zoompan=z={zoom}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-        f":d=1:s={ANCHO}x{ALTO}:fps={FPS}",
+        f":d=1:s={ancho}x{alto}:fps={FPS}",
         "setsar=1",
     ]
     orden = [comun.ffmpeg(), "-y", "-loglevel", "error",
@@ -343,6 +358,13 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
     base = f"[0:v]{','.join(filtros)}"
     ventanas = _ventanas_trozos(trozos or [], duracion)
     if ventanas:
+        # el cuerpo del subtítulo crece con la pantalla en vertical, y
+        # la banda sube a un tercio: en un móvil el pie lo tapan los
+        # controles y la mirada está en el centro (`subtitulos.escala_
+        # subtitulo` y `banda_fija`, las mismas cuentas que troceó p7)
+        sub_escala = subtitulos.escala_subtitulo((ancho, alto))
+        y_sub = ("2*H/3-h" if subtitulos.es_vertical((ancho, alto))
+                 else f"H-h-{SUB_MARGEN}")
         # un PNG por trozo, encadenados sobre la banda del pie; el audio
         # es SIEMPRE la entrada 1 (los PNGs entran detrás)
         partes, previo, entrada = [], "[base]", 2
@@ -357,7 +379,8 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
             png = _subtitulo_png(
                 texto, destino.parent / f"{plano['id']}_sub{k + 1}.png",
                 paleta=paleta_sub, tam=cfg.get("tam", "normal"),
-                diseno=cfg.get("diseno", "pastilla"))
+                diseno=cfg.get("diseno", "pastilla"),
+                ancho_max=sub_ancho, lienzo=ancho, escala=sub_escala)
             if png is None:
                 continue
             orden += ["-loop", "1", "-t", f"{dura:.3f}", "-i", str(png)]
@@ -368,7 +391,7 @@ def _segmento(proyecto: Proyecto, plano: dict, escena: dict,
                 f"fade=t=in:st=0:d={entra:.2f}:alpha=1,"
                 f"fade=t=out:st={dura - sale:.2f}:d={sale:.2f}:alpha=1,"
                 f"setpts=PTS+{desde:.3f}/TB[s{k}];"
-                f"{previo}[s{k}]overlay=x=(W-w)/2:y=H-h-{SUB_MARGEN}"
+                f"{previo}[s{k}]overlay=x=(W-w)/2:y={y_sub}"
                 f":shortest=0[o{k}]")
             previo = f"[o{k}]"
             entrada += 1
@@ -597,6 +620,15 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
                     "paleta": callouts.get("paleta") or {},
                     "tam": callouts.get("subtitulo_tam", "normal"),
                     "subtitulo_caja": callouts.get("subtitulo_caja", "auto")}
+    # EL CUADRO DE SALIDA: el porte con el que p6 pidió las imágenes (lo
+    # apuntó en sus datos) o, si no lo apuntó, el que dicta el brief.
+    # El param «resolucion» de abajo es cosmético (lo lee la ficha del
+    # paso); el cuadro de verdad sale de aquí, y los proyectos de antes
+    # de que existiera el mando siguen saliendo a 1920x1080.
+    ficha_formato = comun.ficha_formato(assets.get("formato")
+                                        or p4_voz.formato_de_salida(proyecto))
+    ancho, alto = ficha_formato["salida"]
+    sub_ancho = min(SUB_ANCHO, ancho - 2 * SUB_MARGEN)
     temporal = Path(tempfile.mkdtemp(prefix="render_"))
     segmentos, sids, cortes = [], [], []
     total = 0.0
@@ -616,7 +648,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
                        f"{plano['id']} ({round(dur, 1)} s)")
         destino = temporal / f"{indice:04d}_{plano['id']}.mp4"
         _segmento(proyecto, plano, escena, subs_de.get(plano["id"]),
-                  destino, calidad, trabajo, cfg_grafismo)
+                  destino, calidad, trabajo, cfg_grafismo,
+                  tamano=(ancho, alto), sub_ancho=sub_ancho)
         segmentos.append(destino)
         sids.append(plano["id"])
         # el CORTE en tiempo global del vídeo: con la ranura que dejó
@@ -720,7 +753,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo) -> dict:
     trabajo.avance(f"vídeo listo: {round(duracion)} s, "
                    f"{destino_final.name}")
     return {"video": "pasos/render/final.mp4", "duracion": duracion,
-            "fps": FPS, "resolucion": f"{ANCHO}x{ALTO}",
+            "fps": FPS, "resolucion": f"{ancho}x{alto}",
             "escenas": len(voz["escenas"]), "planos": len(segmentos),
             "masterizado": masterizado,
             "sonido": sonido.describir(params),

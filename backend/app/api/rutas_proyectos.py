@@ -217,6 +217,13 @@ def crear(cuerpo: dict) -> dict:
         estilo.aplicar_a_params(params_por_paso, estilo_canal)
         # y el kit visual con él: el look del canal, copiado a lo suyo
         estilo.sembrar_kit(AJUSTES.datos, proyecto)
+    # EL PORTE del vídeo (horizontal | vertical) se decide al crear,
+    # junto al idioma: entra en la firma de las imágenes y del render.
+    # Solo si quien crea lo trae — un proyecto que no lo trajo (los de
+    # antes del mando) sigue sin la tecla y cae en horizontal solo.
+    if cuerpo.get("formato"):
+        params_por_paso["brief"]["formato"] = comun.normalizar_formato(
+            cuerpo.get("formato"))
     for paso in GRAFO:
         estado.guardar_params(paso, params_por_paso[paso])
     proyecto.bitacora("proyecto_creado", {"nombre": nombre})
@@ -801,11 +808,14 @@ def leer_previsualizacion(pid: str) -> dict:
                 "palabras": palabras,
                 "trozos": subs_de.get(str(plano.get("id") or sid)) or [],
             })
-    render_params = estado.paso("render").get("params") or {}
+    # el cuadro de la previsualización es el mismo del render: el porte
+    # con el que se pidieron las imágenes, no el param cosmético
+    ficha_formato = comun.ficha_formato(assets.get("formato")
+                                        or p4_voz.formato_de_salida(proyecto))
     return {
         "escenas": escenas,
         "duracion": round(sum(e["duracion"] for e in escenas), 2),
-        "resolucion": str(render_params.get("resolucion", "1920x1080")),
+        "resolucion": "x".join(str(n) for n in ficha_formato["salida"]),
         "con_subtitulos": bool(callouts.get("subtitulos")),
         "montado": proyecto.ruta("pasos/render/final.mp4").exists(),
         "idioma": str(proyecto.leer().get("idioma", "es")),

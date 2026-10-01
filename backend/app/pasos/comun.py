@@ -35,6 +35,42 @@ COSTE_IMAGEN = {"low": 0.015, "medium": 0.015, "high": 0.015}
 CARACTERES_POR_DOLAR = 6667
 
 
+# HORIZONTAL (16:9) O VERTICAL (9:16), y se decide al crear el vídeo (el
+# param `formato` del brief, junto a la duración). Todo lo que cuelga de
+# esa decisión la lee de aquí y de ningún otro sitio: el tamaño al que
+# se PIDE cada imagen, y el cuadro de salida del MP4. Vive en `comun`
+# porque lo leen p2, p4, p6 y p8, y ninguno importa a los demás en ese
+# sentido. El porte del original, con los tamaños de este motor:
+#
+#   salida        el cuadro del MP4 y de la banda quieta (subtítulos)
+#   generacion    el lienzo al que se pide cada imagen a GLM: 16:9 o 9:16
+#   vertical      lo que se le pasa a `imagen_glm.generar`
+FORMATOS = {
+    "horizontal": {"nombre": "Horizontal 16:9", "salida": [1920, 1080],
+                   "generacion": "1344x768", "vertical": False},
+    "vertical": {"nombre": "Vertical 9:16", "salida": [1080, 1920],
+                 "generacion": "768x1344", "vertical": True},
+}
+FORMATO_POR_DEFECTO = "horizontal"
+
+
+def normalizar_formato(valor) -> str:
+    """'vertical' | 'horizontal'. Lo desconocido cae en horizontal, que es
+    lo que había siempre: un proyecto anterior a esto no trae ninguno."""
+    texto = str(valor or "").strip().lower()
+    if texto in ("vertical", "9:16", "9x16", "portrait"):
+        return "vertical"
+    return FORMATO_POR_DEFECTO
+
+
+def ficha_formato(valor) -> dict:
+    """La ficha del formato, con sus tres tamaños. Nunca levanta."""
+    ficha = dict(FORMATOS[normalizar_formato(valor)])
+    ficha["id"] = normalizar_formato(valor)
+    ficha["salida"] = list(ficha["salida"])
+    return ficha
+
+
 def limpiar_id(texto: str, prefijo: str = "S") -> str:
     """S001, S002... a partir del indice o del texto que traiga."""
     encaje = re.search(r"(\d+)", str(texto))

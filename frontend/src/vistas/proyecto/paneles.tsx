@@ -1851,7 +1851,9 @@ export function PanelRender({ pid, ficha, recargar }: PropsPanel) {
         controls
         preload="metadata"
         src={url}
-        className="w-full rounded-lg border bg-black"
+        // max-h: un vídeo vertical a lo ancho del panel sería una torre;
+        // el navegador letterboxea el resto con el fondo negro
+        className="mx-auto max-h-[70vh] w-full rounded-lg border bg-black"
       />
       <div className="flex flex-wrap gap-2 text-xs">
         <Insignia variante="secundario">{segundos(datos.duracion)}</Insignia>
