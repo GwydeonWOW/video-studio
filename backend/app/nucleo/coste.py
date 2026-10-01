@@ -14,9 +14,9 @@ import threading
 from pathlib import Path
 
 try:
-    from .proyecto import ahora, anadir_jsonl, leer_jsonl
+    from .proyecto import ahora, anadir_jsonl, id_valido, leer_jsonl
 except ImportError:
-    from proyecto import ahora, anadir_jsonl, leer_jsonl  # type: ignore
+    from proyecto import ahora, anadir_jsonl, id_valido, leer_jsonl  # type: ignore
 
 _CERROJO = threading.Lock()
 
@@ -76,6 +76,20 @@ def _coste_operacion(tarifas_: dict, entrada: dict) -> float:
     return 0.0
 
 
+def _base_datos(datos_dir: Path | None) -> Path:
+    """La carpeta de datos que manda: la pasada, o la del servicio.
+
+    Sin esto el global caia en ``Path("datos")`` — relativa al directorio
+    desde el que se arranque — y un servicio con `ESTUDIO_DATOS` apuntando
+    a su volumen escribia el historial en otra parte que la que leia la
+    API.
+    """
+    if datos_dir is not None:
+        return Path(datos_dir)
+    from ..config import AJUSTES          # diferido: nucleo no arranca config
+    return AJUSTES.datos
+
+
 def anotar_operacion(datos_dir: Path | None = None, proyecto: str = "",
                      operacion: str = "", proveedor: str = "", modelo: str = "",
                      entrada: int = 0, salida: int = 0, caracteres: int = 0,
@@ -85,6 +99,11 @@ def anotar_operacion(datos_dir: Path | None = None, proyecto: str = "",
 
     Firma pensada para llamarse desde los motores con lo que ya tienen en la
     mano; el coste se calcula de las tarifas si no viene dado.
+
+    Con solo el `proyecto` (un id valido) la operacion TAMBIEN cae en el
+    ``coste.jsonl`` de ese proyecto: los motores no conocen la carpeta, y
+    sin esto la pantalla del coste de un video se quedaba a cero aunque
+    el LLM hubiese gastado.
     """
     registro = {
         "t": ahora(), "operacion": operacion, "proveedor": proveedor,
@@ -93,11 +112,13 @@ def anotar_operacion(datos_dir: Path | None = None, proyecto: str = "",
         "proyecto": proyecto,
     }
     with _CERROJO:
-        base = Path(datos_dir) if datos_dir else Path("datos")
+        base = _base_datos(datos_dir)
         tarifas_ = tarifas(base)
         registro["coste"] = (round(coste, 6) if coste is not None
                              else round(_coste_operacion(tarifas_, registro), 6))
         anadir_jsonl(base / "coste_global.jsonl", registro)
+        if proyecto_dir is None and id_valido(proyecto):
+            proyecto_dir = base / "proyectos" / str(proyecto)
         if proyecto_dir is not None:
             anadir_jsonl(Path(proyecto_dir) / "coste.jsonl", registro)
     return registro
@@ -121,8 +142,33 @@ def total_de(entradas: list[dict]) -> dict:
     return total
 
 
-def global_(datos_dir: Path) -> dict:
-    return total_de(leer_jsonl(Path(datos_dir) / "coste_global.jsonl"))
+def por_proyecto(entradas: list[dict]) -> list[dict]:
+    """Desglose del global: lo gastado por cada vídeo, el que más primero.
+
+    La ficha de cada uno es la misma `total_de` (operaciones, coste,
+    por_operacion, por_proveedor): la pantalla del coste global pinta el
+    mismo desglose para la máquina entera y para cada vídeo.
+    """
+    fichas = []
+    for pid in sorted({str(e.get("proyecto") or "") for e in entradas}):
+        suyos = [e for e in entradas if str(e.get("proyecto") or "") == pid]
+        ficha = total_de(suyos)
+        ficha["proyecto"] = pid or None
+        fichas.append(ficha)
+    fichas.sort(key=lambda f: f["coste"], reverse=True)
+    return fichas
+
+
+def global_(datos_dir: Path, limite: int = 0) -> dict:
+    """Agregado de todos los vídeos, con el desglose de cada uno."""
+    ruta = Path(datos_dir) / "coste_global.jsonl"
+    entradas = leer_jsonl(ruta)
+    if limite and int(limite) > 0:
+        entradas = entradas[-int(limite):]
+    ficha = total_de(entradas)
+    ficha["por_proyecto"] = por_proyecto(entradas)
+    ficha["ruta"] = str(ruta)
+    return ficha
 
 
 def de_proyecto(proyecto_dir: Path) -> dict:
