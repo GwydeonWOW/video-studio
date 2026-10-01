@@ -16,7 +16,6 @@ import {
   type FichaPaso,
   type FichaPasos,
   type FichaProyecto,
-  type FichaReceta,
   type IdPaso,
   type Previsualizacion,
   type RespuestaFeedback,
@@ -50,6 +49,7 @@ import {
 } from "./proyecto/paneles"
 import { PanelRepaso } from "./proyecto/repaso"
 import { PanelEncargo } from "./proyecto/encargo"
+import { DialogoRecetas } from "./proyecto/recetas"
 
 /** el pipeline + el encargo + la pantalla de repaso (sobre el montado) */
 type IdPantalla = IdPaso | "encargo" | "repaso"
@@ -596,7 +596,7 @@ export default function Proyecto() {
         alCambiar={cargar_coste}
       />
 
-      <DialogoReceta
+      <DialogoRecetas
         pid={pid}
         abierto={receta_abierta}
         alCerrar={() => setRecetaAbierta(false)}
@@ -1161,143 +1161,6 @@ function DialogoCoste({
                 <ClipboardCopy /> Copiar bitácora
               </Boton>
             </div>
-          </div>
-        )}
-      </ContenidoDialogo>
-    </Dialogo>
-  )
-}
-
-/* ---------------------------------------------------------------- receta */
-
-function DialogoReceta({
-  pid,
-  abierto,
-  alCerrar,
-  ocupado,
-  alSeguir,
-}: {
-  pid: string
-  abierto: boolean
-  alCerrar: () => void
-  ocupado: boolean
-  alSeguir: (tid: string) => void
-}) {
-  const [ficha, setFicha] = useState<FichaReceta | null>(null)
-
-  useEffect(() => {
-    if (!abierto) return
-    setFicha(null)
-    api
-      .get<FichaReceta>(`/api/proyectos/${pid}/receta`)
-      .then(setFicha)
-      .catch(() => setFicha(null))
-  }, [abierto, pid])
-
-  const lanzar = async (pestana: string, modo: "pendiente" | "todo") => {
-    try {
-      const t = await api.post<TrabajoFicha>(
-        `/api/proyectos/${pid}/receta/${pestana}`,
-        { modo },
-      )
-      toast.success(`receta en marcha (${modo})`)
-      alCerrar()
-      alSeguir(t.id)
-    } catch (e) {
-      toast.error(String((e as Error).message ?? e))
-    }
-  }
-
-  return (
-    <Dialogo abierto={abierto} alCambiar={(a) => (a ? null : alCerrar())}>
-      <ContenidoDialogo className="max-w-2xl">
-        <CabeceraDialogo>
-          <TituloDialogo>De una tirada</TituloDialogo>
-          <DescripcionDialogo>
-            Lo que en pantallas son muchos botones en el orden correcto, aquí
-            es una lista. Cada paso sigue teniendo su botón, su ficha y su
-            revisión: la receta no esconde nada, adelanta trabajo. La voz no
-            se graba sin el guion aprobado.
-          </DescripcionDialogo>
-        </CabeceraDialogo>
-        {!ficha ? (
-          <div className="flex justify-center py-8">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {Object.entries(ficha.pestañas).map(([clave, pestana]) => {
-              const pendientes = pestana.tareas.filter(
-                (t) => t.estado !== "ok",
-              ).length
-              return (
-                <div key={clave} className="rounded-md border p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-sm font-semibold">{pestana.nombre}</p>
-                    {pendientes > 0 ? (
-                      <Insignia variante="aviso">
-                        {pendientes} pendiente{pendientes > 1 ? "s" : ""}
-                      </Insignia>
-                    ) : (
-                      <Insignia variante="exito">al día</Insignia>
-                    )}
-                    <div className="ml-auto flex gap-2">
-                      <Boton
-                        tamano="pequeno"
-                        deshabilitado={ocupado || pendientes === 0}
-                        title="Corre lo que falta y se salta lo que ya está al día"
-                        onClick={() => lanzar(clave, "pendiente")}
-                      >
-                        Generar lo pendiente
-                      </Boton>
-                      <Boton
-                        tamano="pequeno"
-                        variante="contorno"
-                        deshabilitado={ocupado}
-                        title="Lo corre todo, aunque esté al día (paga otra vez)"
-                        onClick={() => lanzar(clave, "todo")}
-                      >
-                        Generar todo
-                      </Boton>
-                    </div>
-                  </div>
-                  <ul className="mt-2 space-y-1.5">
-                    {pestana.tareas.map((t) => (
-                      <li
-                        key={t.id}
-                        className="flex flex-wrap items-center gap-2 text-xs"
-                      >
-                        <span
-                          className={`h-2 w-2 shrink-0 rounded-full ${
-                            t.estado === "ok"
-                              ? "bg-emerald-500"
-                              : t.estado === "obsoleto"
-                                ? "bg-amber-500"
-                                : "bg-muted-foreground/25"
-                          }`}
-                        />
-                        <span className="font-medium">{t.nombre}</span>
-                        {t.cuesta && (
-                          <span
-                            title="gasta dinero al correr"
-                            className="text-amber-600"
-                          >
-                            ¢
-                          </span>
-                        )}
-                        {t.estado === "obsoleto" && (
-                          <Insignia variante="aviso">obsoleto</Insignia>
-                        )}
-                        {t.aprobado && <Insignia variante="exito">✓</Insignia>}
-                        <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                          {t.porque}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )
-            })}
           </div>
         )}
       </ContenidoDialogo>

@@ -435,11 +435,18 @@ def _correr_receta(proyecto: Proyecto, tareas: list[str], modo: str,
 
 @router.get("/{pid}/receta", dependencies=[_SESION])
 def ficha_receta(pid: str) -> dict:
-    """El tablero de la receta: cada tarea con su estado real."""
+    """El tablero de la receta: cada tarea con su estado real.
+
+    Cada pestaña trae también la receta con la que correría AHORA
+    mismo (la puesta por defecto o la de fábrica) y qué tareas de esa
+    receta van puestas: es lo que la pantalla enseña al abrir el
+    diálogo, antes de elegir nada.
+    """
     proyecto = _proyecto_o_404(pid)
     estado = Estado(proyecto)
     pestañas = {}
     for clave, titulo in recetas.PESTANAS.items():
+        receta = recetas.resolver(clave)
         tareas = []
         for t in recetas.TAREAS:
             if t["pestana"] != clave:
@@ -447,28 +454,49 @@ def ficha_receta(pid: str) -> dict:
             ficha = estado.paso(t["paso"])
             tareas.append({**t, "estado": estado.estado_de(t["paso"]),
                            "version": ficha.get("version", 0),
-                           "aprobado": bool(ficha.get("aprobado"))})
-        pestañas[clave] = {"nombre": titulo, "tareas": tareas}
+                           "aprobado": bool(ficha.get("aprobado")),
+                           "puesta": bool(receta["tareas"].get(t["id"],
+                                                               True))})
+        pestañas[clave] = {"nombre": titulo, "tareas": tareas,
+                           "receta": {"id": str(receta["id"]),
+                                      "nombre": receta["nombre"]}}
     return {"pestañas": pestañas, "activo": GESTOR.activo_de(pid)}
 
 
 @router.post("/{pid}/receta/{pestana}", status_code=202, dependencies=_MUTAR)
 def correr_receta(pid: str, pestana: str, cuerpo: dict | None = None) -> dict:
-    """Lanza la receta de UNA pestaña como trabajo en segundo plano."""
+    """Lanza la receta de UNA pestaña como trabajo en segundo plano.
+
+    El cuerpo puede recortarla: `receta` (una guardada del canal),
+    `tareas` ({id: true|false}) y `modo`. Quien lanza manda sobre la
+    guardada, la guardada sobre la puesta por defecto — y lo no
+    opcional va siempre (todo eso lo decide `resolver`). Pantalla y
+    servidor dicen lo mismo porque ambos preguntan a `puestas_de`.
+    """
     proyecto = _proyecto_o_404(pid)
     if pestana not in recetas.PESTANAS:
         raise HTTPException(404, f"no hay pestaña {pestana}")
+    cuerpo = cuerpo or {}
     try:
-        modo = recetas.validar_modo((cuerpo or {}).get("modo"))
+        modo = recetas.validar_modo(cuerpo.get("modo"))
     except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    tareas_pedidas = cuerpo.get("tareas")
+    if tareas_pedidas is not None and not isinstance(tareas_pedidas, dict):
+        raise HTTPException(400, "las tareas van como {id_de_tarea: true|false}")
+    try:
+        receta = recetas.resolver(pestana, cuerpo.get("receta"),
+                                  tareas_pedidas)
+    except recetas.ErrorReceta as fallo:
         raise HTTPException(400, str(fallo)) from None
     if pestana in ("voz", "montaje") and GESTOR.activo_de(pid):
         raise HTTPException(409, "ya hay un trabajo en marcha en este proyecto")
-    tareas = recetas.tareas_de(pestana)
+    tareas = recetas.puestas_de(pestana, receta)
     lanzado = GESTOR.lanzar(pid, "receta",
                             lambda t: _correr_receta(proyecto, tareas,
                                                      modo, t))
     proyecto.bitacora("receta_lanzada", {"pestaña": pestana, "modo": modo,
+                                         "receta": receta["nombre"],
                                          "trabajo": lanzado.id})
     return GESTOR.estado(lanzado.id)
 

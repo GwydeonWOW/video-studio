@@ -262,15 +262,60 @@ export interface RecetaTarea {
   paso: string
   necesita: string[]
   cuesta: boolean
+  /** si una receta puede apagarla (la columna vertebral nunca) */
+  opcional: boolean
   porque: string
   estado: EstadoPaso
   version: number
   aprobado?: boolean
+  /** si corre con la receta resuelta de su pestaña */
+  puesta?: boolean
+}
+
+/** Receta guardada por quien usa el estudio (del canal, no de un vídeo). */
+export interface RecetaGuardada {
+  id: string
+  pestana: string
+  nombre: string
+  nota: string
+  tareas: Record<string, boolean>
+}
+
+/** Tarea del catálogo del canal (GET /api/recetas): la tabla, sin estado. */
+export interface TareaCatalogo {
+  id: string
+  nombre: string
+  pestana: string
+  paso: string
+  necesita: string[]
+  cuesta: boolean
+  /** si una receta puede apagarla (la columna vertebral nunca) */
+  opcional: boolean
+  porque: string
+  /** si viene encendida sin receta guardada */
+  de_fabrica: boolean
+}
+
+/** GET /api/recetas: lo que hace falta para pintar el selector. */
+export interface CatalogoRecetas {
+  pestañas: Record<string, string>
+  tareas: TareaCatalogo[]
+  tandas: Record<string, { nombre: string; pestanas: string[]; sin: string[] }>
+  recetas: RecetaGuardada[]
+  por_defecto: Record<string, string>
 }
 
 /** Tablero de la receta de un proyecto (qué falta, en qué pestaña). */
 export interface FichaReceta {
-  pestañas: Record<string, { nombre: string; tareas: RecetaTarea[] }>
+  pestañas: Record<
+    string,
+    {
+      nombre: string
+      tareas: RecetaTarea[]
+      /** la receta con la que correría esta pestaña ahora mismo */
+      receta: { id: string; nombre: string }
+    }
+  >
   activo: TrabajoFicha | null
 }
 
