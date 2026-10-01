@@ -27,8 +27,8 @@ from ..nucleo import grafismo
 from ..nucleo.coste import de_proyecto
 from ..nucleo.estado import GRAFO, Estado, descendientes_de
 from ..nucleo import recetas
-from ..nucleo.proyecto import (Proyecto, ahora, escribir_json, id_valido,
-                               leer_json, leer_jsonl, lock_de,
+from ..nucleo.proyecto import (Proyecto, ahora, anotar_global, escribir_json,
+                               id_valido, leer_json, leer_jsonl, lock_de,
                                ruta_contenida)
 from ..nucleo.trabajos import TrabajoCancelado
 from ..pasos import (cartelas, catalogo_visual, comun, conservar, cta,
@@ -245,6 +245,17 @@ def _camino_papelera(carpeta: str):
     return origen
 
 
+def _censo_de(origen: Path) -> tuple[int, int]:
+    """Cuántos ficheros hay bajo una carpeta y cuánto pesan en bytes."""
+    ficheros = 0
+    peso = 0
+    for ruta in origen.rglob("*"):
+        if ruta.is_file():
+            ficheros += 1
+            peso += ruta.stat().st_size
+    return ficheros, peso
+
+
 @router.get("/papelera", dependencies=[_SESION])
 def listar_papelera() -> list[dict]:
     papelera = AJUSTES.datos / "papelera"
@@ -283,6 +294,14 @@ def borrar_definitivo(carpeta: str):
     origen = _camino_papelera(carpeta)
     if not origen.is_dir():
         raise HTTPException(404, "no está en la papelera")
+    ficha = leer_json(origen / "proyecto.json", {}) or {}
+    ficheros, peso = _censo_de(origen)
+    # la bitácora global sobrevive al proyecto: es el único sitio donde
+    # queda constancia de que existió y de que se borró a propósito
+    # (su propia bitácora se va con la carpeta)
+    anotar_global("proyecto_borrado",
+                  {"carpeta": carpeta, "ficheros": ficheros, "bytes": peso},
+                  proyecto=ficha.get("id"))
     shutil.rmtree(origen)
 
 
@@ -292,9 +311,21 @@ def vaciar_papelera():
     papelera = AJUSTES.datos / "papelera"
     if not papelera.is_dir():
         return
+    borrados = 0
+    ficheros = 0
+    peso = 0
     for carpeta in list(papelera.iterdir()):
-        if carpeta.is_dir():
-            shutil.rmtree(carpeta)
+        if not carpeta.is_dir():
+            continue
+        f, p = _censo_de(carpeta)
+        shutil.rmtree(carpeta)
+        borrados += 1
+        ficheros += f
+        peso += p
+    if borrados:
+        anotar_global("papelera_vaciada", {"borrados": borrados,
+                                           "ficheros": ficheros,
+                                           "bytes": peso})
 
 
 @router.get("/papelera/{carpeta}", dependencies=[_SESION])

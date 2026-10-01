@@ -26,6 +26,7 @@ sys.path.insert(0, str(_raiz))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+from app.nucleo.proyecto import leer_jsonl, ruta_bitacora_global  # noqa: E402
 
 cliente = TestClient(app)
 fallos: list[str] = []
@@ -304,15 +305,37 @@ cliente.delete(f"/api/proyectos/{pid2}")
 r = cliente.get("/api/proyectos/papelera").json()
 check("apartado aparece en la papelera", len(r) == 1, str(r))
 carpeta = r[0]["carpeta"] if r else ""
+borrado_id = r[0]["id"] if r else ""
 
 r = cliente.get(f"/api/proyectos/papelera/{carpeta}").json()
 check("inventario de lo que se pierde",
       r.get("ficheros", 0) > 0 and "proyecto.json" in str(
           r.get("por_carpeta", {})), str(r)[:200])
 
+# borrado definitivo de UNO: sin vuelta atrás, pero la bitácora global
+# recuerda que existió (la suya se fue con la carpeta)
+r = cliente.delete(f"/api/proyectos/papelera/{carpeta}")
+globales = leer_jsonl(ruta_bitacora_global())
+check("borrado definitivo -> 204 y constancia en la global",
+      r.status_code == 204
+      and any(e.get("evento") == "proyecto_borrado"
+              and e.get("proyecto") == borrado_id
+              and e.get("ficheros", 0) > 0 for e in globales),
+      str([e for e in globales
+           if e.get("evento") == "proyecto_borrado"])[:150])
+
+# y vaciar la papelera entera también deja su evento resumen
+pid3 = cliente.post("/api/proyectos", json={"nombre": "Efimero"}).json()["id"]
+cliente.delete(f"/api/proyectos/{pid3}")
 r = cliente.delete("/api/proyectos/papelera")
+globales = leer_jsonl(ruta_bitacora_global())
 check("vaciar papelera con contenido", r.status_code == 204
       and cliente.get("/api/proyectos/papelera").json() == [])
+check("el vaciado queda apuntado en la global",
+      any(e.get("evento") == "papelera_vaciada"
+          and e.get("borrados", 0) >= 1 for e in globales),
+      str([e for e in globales
+           if e.get("evento") == "papelera_vaciada"])[:150])
 
 # ------------------------------------------------------- estadísticas
 r = cliente.get("/api/estadisticas").json()
