@@ -14,6 +14,7 @@ from .. import seguridad
 from ..config import AJUSTES
 from ..motores import llm, voz_elevenlabs
 from ..nucleo import coste as nucleo_coste
+from ..nucleo import recetas
 from ..nucleo.claves import (CATALOGO, enmascaradas, guardar_claves,
                              probar_claves)
 from ..nucleo.proyecto import leer_json, escribir_json
@@ -42,6 +43,24 @@ def salud() -> dict:
 
 # ------------------------------------------------------------------ claves
 
+@router.get("/salud/llm", dependencies=[_SESION])
+def salud_llm_por_proveedor() -> dict:
+    """Cómo respondió cada proveedor la última vez que se le habló.
+
+    Lo pinta Configuración al lado de cada clave: «puesta» no es
+    «funciona» — un cupo agotado o una clave caducada solo se ve
+    contando lo último que pasó al hablar con el proveedor.
+    """
+    from ..nucleo import salud_llm as nucleo_salud
+    salida: dict = {}
+    for pid, ficha in nucleo_salud.leer().items():
+        if isinstance(ficha, dict):
+            etiqueta = llm.PROVEEDORES.get(pid, {}).get("nombre", pid)
+            salida[pid] = {**ficha,
+                           "frase": nucleo_salud.describir(ficha, etiqueta)}
+    return salida
+
+
 @router.get("/claves", dependencies=[_SESION])
 def estado_claves() -> list[dict]:
     return enmascaradas(AJUSTES.carpeta_claves)
@@ -62,6 +81,33 @@ def poner_claves(cuerpo: dict) -> list[dict]:
 def probar() -> dict:
     """Prueba cada clave contra su servicio, sin coste (30 s por servicio)."""
     return probar_claves(AJUSTES.carpeta_claves)
+
+
+# ---------------------------------------------------------------- recetas
+# Las recetas guardadas son del CANAL, no de un vídeo: viven aquí, al
+# lado de las claves y de los modelos por rol.
+
+@router.get("/recetas", dependencies=[_SESION])
+def catalogo_recetas() -> dict:
+    """El catálogo de tareas por pestaña y las recetas guardadas."""
+    return recetas.catalogo()
+
+
+@router.post("/recetas", dependencies=_MUTAR)
+def guardar_receta(cuerpo: dict) -> dict:
+    try:
+        return recetas.guardar(cuerpo or {})
+    except recetas.ErrorReceta as fallo:
+        raise HTTPException(400, str(fallo)) from None
+
+
+@router.delete("/recetas/{rid}", dependencies=_MUTAR)
+def borrar_receta(rid: str) -> dict:
+    try:
+        recetas.borrar(rid)
+    except recetas.ErrorReceta as fallo:
+        raise HTTPException(404, str(fallo)) from None
+    return {"borrada": rid}
 
 
 # ------------------------------------------------------------ codex (OAuth)
@@ -207,8 +253,9 @@ def poner_tarifas(cuerpo: dict) -> dict:
 
 
 @router.get("/coste/global", dependencies=[_SESION])
-def coste_global() -> dict:
-    return nucleo_coste.global_(AJUSTES.datos)
+def coste_global(limite: int = 0) -> dict:
+    """Agregado de todos los vídeos, con el desglose de cada uno."""
+    return nucleo_coste.global_(AJUSTES.datos, limite=limite)
 
 
 # ------------------------------------------------------------ estadísticas

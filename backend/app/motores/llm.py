@@ -28,6 +28,11 @@ try:
 except ImportError:  # uso suelto
     anotar_operacion = None  # type: ignore
 
+try:
+    from ..nucleo import salud_llm
+except ImportError:  # uso suelto
+    salud_llm = None  # type: ignore
+
 TIEMPO_FUERA_S = 600
 INTENTOS = 3
 
@@ -280,8 +285,13 @@ def llamar(llamada: Llamada, claves: dict | None = None,
             if respuesta.status_code == 200:
                 texto, uso = _extraer(_cuerpo_de(respuesta, esquema), esquema)
                 _apuntar(llamada, uso)
+                _anotar_salud(llamada.proveedor, "ok", para=llamada.modelo)
                 return texto
             if respuesta.status_code in (401, 403, 404):
+                _anotar_salud(
+                    llamada.proveedor, "sesion",
+                    f"{respuesta.status_code}: {respuesta.text[:200]}",
+                    para=llamada.modelo)
                 raise ErrorLLM(
                     f"{llamada.proveedor} rechazo la llamada "
                     f"({respuesta.status_code}): {respuesta.text[:300]}")
@@ -293,6 +303,8 @@ def llamar(llamada: Llamada, claves: dict | None = None,
             ultimo_error = (f"{respuesta.status_code}: {respuesta.text[:300]}")
         if intento < INTENTOS:
             time.sleep(2 ** intento)
+    _anotar_salud(llamada.proveedor, _estado_salud(ultimo_error),
+                  ultimo_error, para=llamada.modelo)
     raise ErrorLLM(f"{llamada.proveedor} fallo tras {INTENTOS} intentos: "
                    f"{ultimo_error}")
 
@@ -432,6 +444,29 @@ def _apuntar(llamada: Llamada, uso: dict) -> None:
         pass  # el medidor nunca tumba la llamada
 
 
+def _anotar_salud(proveedor: str, estado: str, mensaje: str = "",
+                  para: str = "") -> None:
+    """Deja constancia de cómo fue la última charla con el proveedor.
+
+    Como `_apuntar`: diagnóstico puro — si no se puede escribir, la
+    llamada ya salió bien o mal por sus propios medios y no hay que
+    tumbarla por un apunte. No se anota nada cuando NI SE HA LLAMADO
+    (falta de clave): la salud cuenta lo que pasó al hablar, no lo que
+    no se hizo.
+    """
+    if salud_llm is None:
+        return
+    try:
+        salud_llm.anotar(proveedor, estado, mensaje, para)
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
+def _estado_salud(texto: str) -> str:
+    """El estado que corresponde a un texto de fallo (defecto: error)."""
+    return salud_llm.clasificar(texto) if salud_llm is not None else "error"
+
+
 def llamar_json(llamada: Llamada, claves: dict | None = None,
                 ajustes_proveedor: dict | None = None) -> dict | list:
     """Llama pidiendo JSON y lo parsea con rescate.
@@ -489,7 +524,12 @@ def rescatar_json(texto: str) -> dict | list:
 
 
 def probar(proveedor: str, claves: dict | None = None) -> dict:
-    """Prueba de vida barata: lista modelos o pregunta de una palabra."""
+    """Prueba de vida barata: lista modelos o pregunta de una palabra.
+
+    Sin clave no se anota salud (no se ha hablado con nadie); el resto
+    de desenlaces sí — esta prueba es la otra mitad del estado que
+    Configuración pinta al lado de cada clave.
+    """
     clave = clave_de(proveedor, claves)
     if not clave:
         return {"ok": False, "detalle": "sin clave"}
@@ -501,6 +541,7 @@ def probar(proveedor: str, claves: dict | None = None) -> dict:
                 proveedor="codex", modelo=PROVEEDORES["codex"]["defecto"],
                 sistema="Contesta con una sola palabra.", instruccion="Di: ok",
             ), claves)
+            _anotar_salud(proveedor, "ok", texto.strip()[:40])
             return {"ok": True, "detalle": texto.strip()[:40] or "sesion valida"}
         if _esquema_de(proveedor) == "openai":
             url = f"{_base_de(proveedor)}/models"
@@ -513,13 +554,18 @@ def probar(proveedor: str, claves: dict | None = None) -> dict:
                               "anthropic-version": "2023-06-01"},
                 timeout=30)
         if respuesta.status_code == 200:
+            _anotar_salud(proveedor, "ok", "clave valida")
             return {"ok": True, "detalle": "clave valida"}
-        return {"ok": False,
-                "detalle": f"{respuesta.status_code}: {respuesta.text[:200]}"}
+        detalle = f"{respuesta.status_code}: {respuesta.text[:200]}"
+        _anotar_salud(proveedor, _estado_salud(detalle), detalle)
+        return {"ok": False, "detalle": detalle}
     except ErrorLLM as fallo:
+        _anotar_salud(proveedor, _estado_salud(str(fallo)), str(fallo)[:200])
         return {"ok": False, "detalle": str(fallo)[:200]}
     except requests.RequestException as fallo:
-        return {"ok": False, "detalle": f"red: {fallo}"}
+        detalle = f"red: {fallo}"
+        _anotar_salud(proveedor, _estado_salud(detalle), detalle[:200])
+        return {"ok": False, "detalle": detalle}
 
 
 def rol_config(rol: str, ajustes_llm: dict | None = None) -> Llamada:
@@ -644,8 +690,13 @@ def llamar_conversacion(llamada: Llamada, mensajes: list[dict],
                 crudo = _cuerpo_de(respuesta, esquema)
                 texto, llamadas, uso = _extraer_conversacion(crudo, esquema)
                 _apuntar(llamada, uso)
+                _anotar_salud(llamada.proveedor, "ok", para=llamada.modelo)
                 return {"texto": texto, "llamadas": llamadas, "uso": uso}
             if respuesta.status_code in (401, 403, 404):
+                _anotar_salud(
+                    llamada.proveedor, "sesion",
+                    f"{respuesta.status_code}: {respuesta.text[:200]}",
+                    para=llamada.modelo)
                 raise ErrorLLM(
                     f"{llamada.proveedor} rechazo la llamada "
                     f"({respuesta.status_code}): {respuesta.text[:300]}")
@@ -655,6 +706,8 @@ def llamar_conversacion(llamada: Llamada, mensajes: list[dict],
             ultimo_error = f"{respuesta.status_code}: {respuesta.text[:300]}"
         if intento < INTENTOS:
             time.sleep(2 ** intento)
+    _anotar_salud(llamada.proveedor, _estado_salud(ultimo_error),
+                  ultimo_error, para=llamada.modelo)
     raise ErrorLLM(f"{llamada.proveedor} fallo tras {INTENTOS} intentos: "
                    f"{ultimo_error}")
 

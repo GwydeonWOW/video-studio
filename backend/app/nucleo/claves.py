@@ -139,24 +139,18 @@ def probar_claves(carpeta: Path | str) -> dict:
     claves = leer_claves(carpeta)
     resultados: dict[str, dict] = {}
 
-    if claves.get("glm"):
-        try:
-            # misma base que usan los textos (motores/llm.py): el Coding
-            # Plan y el pago por token no viven en la misma URL
-            from ..motores.llm import PROVEEDORES
-            base = str(PROVEEDORES["glm"]["base"]).rstrip("/")
-            r = requests.get(f"{base}/models",
-                             headers={"Authorization": f"Bearer {claves['glm']}"},
-                             timeout=30)
-            resultados["glm"] = {"ok": r.status_code == 200,
-                                 "detalle": f"{r.status_code}"}
-        except requests.RequestException as e:
-            resultados["glm"] = {"ok": False, "detalle": f"red: {e}"}
+    from ..motores import llm as _llm
+    # los proveedores de texto van POR llm.probar y no con llamadas
+    # sueltas: es la misma prueba (listar modelos, misma base y esquema
+    # que usan los textos) Y la que alimenta la salud de la clave
+    # (salud_llm): la pantalla cuenta lo último que pasó de verdad.
+    for proveedor in ("glm", "openai", "anthropic"):
+        if claves.get(proveedor):
+            resultados[proveedor] = _llm.probar(proveedor, claves)
     # codex: sesion OAuth, no clave — se prueba con una pregunta de dos
     # palabras contra la cuenta conectada
     try:
         from ..motores import codex_oauth
-        from ..motores import llm as _llm
         if codex_oauth.estado(carpeta).get("conectado") or \
                 os.environ.get("ESTUDIO_CODEX_TOKEN"):
             resultados["codex"] = _llm.probar("codex", claves)
@@ -166,27 +160,6 @@ def probar_claves(carpeta: Path | str) -> dict:
                 "detalle": "sin sesion: se conecta con el boton, no es una clave"}
     except Exception as e:  # ErrorCodex, ErrorLLM, red
         resultados["codex"] = {"ok": False, "detalle": str(e)[:200]}
-    if claves.get("openai"):
-        try:
-            r = requests.get("https://api.openai.com/v1/models",
-                             headers={"Authorization": f"Bearer {claves['openai']}"},
-                             timeout=30)
-            resultados["openai"] = {
-                "ok": r.status_code == 200,
-                "detalle": "valida (saldo no comprobable)" if r.status_code == 200
-                else f"{r.status_code}"}
-        except requests.RequestException as e:
-            resultados["openai"] = {"ok": False, "detalle": f"red: {e}"}
-    if claves.get("anthropic"):
-        try:
-            r = requests.get("https://api.anthropic.com/v1/models",
-                             headers={"x-api-key": claves["anthropic"],
-                                      "anthropic-version": "2023-06-01"},
-                             timeout=30)
-            resultados["anthropic"] = {"ok": r.status_code == 200,
-                                       "detalle": f"{r.status_code}"}
-        except requests.RequestException as e:
-            resultados["anthropic"] = {"ok": False, "detalle": f"red: {e}"}
     if claves.get("elevenlabs"):
         try:
             r = requests.get("https://api.elevenlabs.io/v1/user",

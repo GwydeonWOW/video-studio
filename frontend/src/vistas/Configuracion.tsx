@@ -136,6 +136,32 @@ interface PruebaClave {
   detalle: string
 }
 
+/** La última charla con cada proveedor de LLM (GET /api/salud/llm). */
+interface SaludLLM {
+  estado: "ok" | "cupo" | "sesion" | "tiempo" | "error"
+  mensaje: string
+  para: string
+  cuando: string
+  frase: string
+}
+
+function variante_salud(estado: string) {
+  return estado === "ok"
+    ? "exito"
+    : estado === "sesion" || estado === "error"
+      ? "destructivo"
+      : "aviso"
+}
+
+function FraseSalud({ salud }: { salud: SaludLLM }) {
+  return (
+    <p className="flex flex-wrap items-center gap-1.5 text-xs">
+      <Insignia variante={variante_salud(salud.estado)}>{salud.estado}</Insignia>
+      <span className="text-muted-foreground">{salud.frase}</span>
+    </p>
+  )
+}
+
 function PestanaClaves() {
   const [lista, setLista] = useState<ClaveEstado[] | null>(null)
   const [valores, setValores] = useState<Record<string, string>>({})
@@ -144,12 +170,17 @@ function PestanaClaves() {
   const [pruebas, setPruebas] = useState<Record<string, PruebaClave> | null>(
     null
   )
+  const [salud, setSalud] = useState<Record<string, SaludLLM> | null>(null)
 
   useEffect(() => {
     api
       .get<ClaveEstado[]>("/api/claves")
       .then(setLista)
       .catch(() => setLista([]))
+    api
+      .get<Record<string, SaludLLM>>("/api/salud/llm")
+      .then(setSalud)
+      .catch(() => {})
   }, [])
 
   const recargar = useCallback(() => {
@@ -185,6 +216,11 @@ function PestanaClaves() {
       setPruebas(
         await api.post<Record<string, PruebaClave>>("/api/claves/probar")
       )
+      // la prueba acaba de hablar con los proveedores: la salud nueva
+      api
+        .get<Record<string, SaludLLM>>("/api/salud/llm")
+        .then(setSalud)
+        .catch(() => {})
     } catch (e) {
       toast.error(String((e as Error).message ?? e))
     } finally {
@@ -209,8 +245,16 @@ function PestanaClaves() {
       </p>
       {lista.map((c) => {
         const prueba = pruebas?.[c.clave]
+        const su_salud = salud?.[c.clave]
         if (c.clave === "codex")
-          return <FilaCodex key={c.clave} estado={c} alCambiar={recargar} />
+          return (
+            <FilaCodex
+              key={c.clave}
+              estado={c}
+              alCambiar={recargar}
+              salud={salud?.["codex"]}
+            />
+          )
         return (
           <div key={c.clave} className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
@@ -239,6 +283,7 @@ function PestanaClaves() {
               placeholder={`variable ${c.variable}`}
             />
             <p className="text-xs text-muted-foreground">{c.uso}</p>
+            {su_salud && <FraseSalud salud={su_salud} />}
           </div>
         )
       })}
@@ -266,9 +311,11 @@ function PestanaClaves() {
 function FilaCodex({
   estado,
   alCambiar,
+  salud,
 }: {
   estado: ClaveEstado
   alCambiar: () => void
+  salud?: SaludLLM
 }) {
   const [flujo, setFlujo] = useState<CodexFlujo | null>(null)
   const [conectando, setConectando] = useState(false)
@@ -375,6 +422,7 @@ function FilaCodex({
           </Boton>
         </>
       )}
+      {estado.presente && salud && <FraseSalud salud={salud} />}
 
       <Dialogo
         abierto={flujo !== null}
