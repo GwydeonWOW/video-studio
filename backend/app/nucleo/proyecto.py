@@ -146,6 +146,44 @@ def anadir_jsonl(ruta: Path | str, entrada: dict) -> None:
         fichero.write(json.dumps(entrada, ensure_ascii=False) + "\n")
 
 
+#: Cerrojo de la bitacora global: dos hilos pueden terminar un paso a
+#: la vez, y dos `append` entrelazados en el mismo fichero dejan una
+#: linea partida por la mitad (dos JSON rotos).
+_BITACORA_GLOBAL_CERROJO = threading.Lock()
+
+
+def ruta_bitacora_global() -> Path:
+    """La bitacora de TODOS los proyectos: una linea por evento, con el
+    proyecto anotado.
+
+    Redirigible con `ESTUDIO_BITACORA_GLOBAL` (en el servidor cada
+    cuenta tiene la suya: una bitacora compartida mezclaria dos
+    historiales que no se conocen) y, si no, junto al resto de los
+    datos. Nada se sobreescribe nunca: es el registro del que aprenden
+    el asistente y las estadisticas.
+    """
+    desde_entorno = os.environ.get("ESTUDIO_BITACORA_GLOBAL")
+    if desde_entorno:
+        return Path(desde_entorno)
+    from ..config import AJUSTES          # diferido: nucleo no arranca config
+    return AJUSTES.datos / "bitacora_global.jsonl"
+
+
+def anotar_global(evento: str, detalle: dict | None = None,
+                  proyecto: str | None = None) -> None:
+    """Anota SOLO en la bitacora global, sin proyecto vivo detras.
+
+    Existe por el borrado definitivo: cuando la carpeta del proyecto ya
+    no esta, su bitacora se ha ido con ella, y el unico sitio donde
+    puede quedar constancia de que existio y de que alguien lo borro a
+    proposito es la global.
+    """
+    registro = {"t": ahora_precisa(), "evento": str(evento),
+                "proyecto": proyecto, **(detalle or {})}
+    with _BITACORA_GLOBAL_CERROJO:
+        anadir_jsonl(ruta_bitacora_global(), registro)
+
+
 class Proyecto:
     """Vista tipada de un proyecto en disco.
 
@@ -204,8 +242,19 @@ class Proyecto:
         return self.fichero_proyecto.is_file()
 
     def bitacora(self, evento: str, detalle: dict | None = None) -> None:
-        anadir_jsonl(self.fichero_bitacora,
-                     {"t": ahora_precisa(), "evento": evento, **(detalle or {})})
+        """Un evento del proyecto, anotado en SU bitacora y en la global.
+
+        La global (`ruta_bitacora_global`) lleva la misma linea con el
+        id y la raiz del proyecto delante: es el historial de la
+        maquina entera. Las dos escrituras van bajo el mismo cerrojo,
+        como en el original.
+        """
+        registro = {"t": ahora_precisa(), "evento": evento, **(detalle or {})}
+        with _BITACORA_GLOBAL_CERROJO:
+            anadir_jsonl(self.fichero_bitacora, registro)
+            anadir_jsonl(ruta_bitacora_global(),
+                         {**registro, "proyecto": self.id,
+                          "raiz": str(self.raiz)})
 
     # ------------------------------------------------------------ listado
     @staticmethod

@@ -27,7 +27,7 @@ from ..motores import llm
 from ..nucleo.claves import CATALOGO, leer_claves
 from ..nucleo.coste import de_proyecto
 from ..nucleo.estado import Estado, GRAFO
-from ..nucleo.proyecto import Proyecto, leer_jsonl
+from ..nucleo.proyecto import (Proyecto, leer_jsonl, ruta_bitacora_global)
 from ..pasos import asistente
 from .rutas_trabajos import GESTOR
 
@@ -221,6 +221,16 @@ def foto_del_estudio(pid: str, pantalla: dict | None = None) -> str:
                           f"{trabajo['estado']}")
     except Exception as fallo:                          # noqa: BLE001
         lineas.append(f"trabajos: no se han podido leer ({fallo})")
+
+    # -- lo último que pasó en la máquina (todos los proyectos)
+    try:
+        globales = leer_jsonl(ruta_bitacora_global())[-15:]
+        if globales:
+            lineas.append("\núltimos eventos globales (todos los proyectos):")
+            for evento in globales:
+                lineas.append(f"  {evento}")
+    except Exception as fallo:                          # noqa: BLE001
+        lineas.append(f"bitácora global: no se ha podido leer ({fallo})")
 
     # -- lo que la pantalla tiene delante
     if isinstance(pantalla, dict):
