@@ -31,16 +31,40 @@ from ..config import AJUSTES
 from ..motores import llm
 from ..nucleo.coste import anotar_operacion
 from ..nucleo.proyecto import Proyecto
+from ..nucleo import voz_canal
 from . import comun, marcas_tts, p2_brief
 from ..motores import voz_elevenlabs
 
 
 def params_defecto() -> dict:
-    # voz por defecto de Eleven Labs (Rachel); la pantalla lista las demas.
-    # hueco_minimo: aire garantizado ENTRE escenas en la toma continua.
-    return {"voz": "21m00Tcm4TlvDq8ikWAM", "modelo": "multilingual",
+    # voz de fábrica de ElevenLabs (Rachel); la pantalla lista las demás.
+    # Se siembra SIEMPRE la de fábrica (nunca la del canal): así un vídeo
+    # sin elecciones sigue en vivo a lo que Configuración fije (ver
+    # _voz_y_motor). hueco_minimo: aire garantizado ENTRE escenas en la
+    # toma continua.
+    return {"voz": voz_canal.VOZ_FABRICA, "modelo": voz_canal.MOTOR_DEFECTO,
             "estabilidad": 0.5, "similitud": 0.75, "velocidad": 1.0,
             "modo": "continua", "hueco_minimo": 1.0}
+
+
+def _voz_y_motor(params: dict) -> tuple[str, str]:
+    """(voz, motor) que ESTA corrida usará de verdad.
+
+    Jerarquía: lo elegido EN el vídeo manda (su pestaña de Voz, un
+    preset o el estilo del canal al crearlo — todo eso vive en sus
+    params); un valor que sigue siendo el de FÁBRICA es uno que nadie
+    eligió para este vídeo, y entonces manda lo fijado en Configuración
+    para el canal. Sin nada de nada: la fábrica. Por eso la voz del
+    canal se nota sin re-crear vídeos: se resuelve en cada corrida.
+    """
+    canal = voz_canal.leer(AJUSTES.datos)
+    voz = str(params.get("voz") or "")
+    if voz in ("", voz_canal.VOZ_FABRICA) and canal["voz"]:
+        voz = canal["voz"]
+    motor = str(params.get("modelo") or "")
+    if motor in ("", voz_canal.MOTOR_DEFECTO) and canal["motor"]:
+        motor = canal["motor"]
+    return voz or voz_canal.VOZ_FABRICA, motor or voz_canal.MOTOR_DEFECTO
 
 
 def estimar(params: dict) -> dict:
@@ -89,6 +113,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
         return _voz_continua(proyecto, params, escenas, claves, carpeta,
                              trabajo)
     salida, total = [], 0.0
+    voz, motor = _voz_y_motor(params)
     for indice, escena in enumerate(escenas, start=1):
         trabajo.comprobar_cancelacion()
         # las anotaciones del guion viajan con el texto; el motor las calla
@@ -96,8 +121,8 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
         trabajo.avance(f"voz {indice}/{len(escenas)}: {escena['id']}")
         destino = carpeta / f"{escena['id']}.mp3"
         marca = voz_elevenlabs.hablar_con_marcas(
-            narracion, params.get("voz", params_defecto()["voz"]), destino,
-            claves=claves, modelo=params.get("modelo", "multilingual"),
+            narracion, voz, destino,
+            claves=claves, modelo=motor,
             estabilidad=float(params.get("estabilidad", 0.5)),
             similitud=float(params.get("similitud", 0.75)),
             velocidad=float(params.get("velocidad", 1.0)))
@@ -105,7 +130,7 @@ def ejecutar(proyecto: Proyecto, params: dict, trabajo,
         duracion = comun.duracion_de(destino) or marca["duracion"]
         anotar_operacion(
             datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="voz",
-            proveedor="elevenlabs", modelo=params.get("modelo", "multilingual"),
+            proveedor="elevenlabs", modelo=motor,
             caracteres=len(narracion), contexto=f"voz:{escena['id']}",
             proyecto_dir=proyecto.raiz)
         salida.append({"id": escena["id"], "audio": f"pasos/voz/audio/{escena['id']}.mp3",
@@ -136,9 +161,10 @@ def _voz_continua(proyecto: Proyecto, params: dict, escenas: list,
     trabajo.avance(f"toma única: {len(escenas)} escenas, "
                    f"{len(transcript)} caracteres")
     destino = carpeta / "_toma.mp3"
+    voz, motor = _voz_y_motor(params)
     marca = voz_elevenlabs.hablar_con_marcas(
-        transcript, params.get("voz", params_defecto()["voz"]), destino,
-        claves=claves, modelo=params.get("modelo", "multilingual"),
+        transcript, voz, destino,
+        claves=claves, modelo=motor,
         estabilidad=float(params.get("estabilidad", 0.5)),
         similitud=float(params.get("similitud", 0.75)),
         velocidad=float(params.get("velocidad", 1.0)))
@@ -210,7 +236,7 @@ def _voz_continua(proyecto: Proyecto, params: dict, escenas: list,
         trabajo.avance(f"{sid}: {duracion:g} s de la toma")
     anotar_operacion(
         datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="voz",
-        proveedor="elevenlabs", modelo=params.get("modelo", "multilingual"),
+        proveedor="elevenlabs", modelo=motor,
         caracteres=len(transcript), contexto="voz:toma_continua",
         proyecto_dir=proyecto.raiz)
     trabajo.avance(f"toma completa: {len(salida)} escenas, "
@@ -229,16 +255,17 @@ def regrabar_escena(proyecto: Proyecto, escena_id: str, params: dict) -> dict:
     claves = comun.claves_actuales()
     destino = proyecto.carpeta_paso("voz") / "audio" / f"{escena_id}.mp3"
     narracion = marcas_tts.para_tts(marcas_tts.sanear(escena["narracion"]))
+    voz, motor = _voz_y_motor(params)
     marca = voz_elevenlabs.hablar_con_marcas(
-        narracion, params.get("voz", params_defecto()["voz"]),
-        destino, claves=claves, modelo=params.get("modelo", "multilingual"),
+        narracion, voz,
+        destino, claves=claves, modelo=motor,
         estabilidad=float(params.get("estabilidad", 0.5)),
         similitud=float(params.get("similitud", 0.75)),
         velocidad=float(params.get("velocidad", 1.0)))
     duracion = comun.duracion_de(destino) or marca["duracion"]
     anotar_operacion(
         datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="voz",
-        proveedor="elevenlabs", modelo=params.get("modelo", "multilingual"),
+        proveedor="elevenlabs", modelo=motor,
         caracteres=len(narracion), contexto=f"voz:{escena_id}",
         proyecto_dir=proyecto.raiz)
     ficha = {"id": escena_id, "audio": f"pasos/voz/audio/{escena_id}.mp3",
@@ -303,16 +330,17 @@ def previsualizar(proyecto: Proyecto, params: dict, segundos: float = 20.0) -> d
     # si la muestra sale del guion puede traer anotaciones: se locutan
     texto = marcas_tts.para_tts(marcas_tts.sanear(texto))
     destino = proyecto.carpeta_paso("voz") / "previsualizacion.mp3"
+    voz, motor = _voz_y_motor(params)
     voz_elevenlabs.hablar(
-        texto, params.get("voz", params_defecto()["voz"]), destino,
+        texto, voz, destino,
         claves=comun.claves_actuales(),
-        modelo=params.get("modelo", "multilingual"),
+        modelo=motor,
         estabilidad=float(params.get("estabilidad", 0.5)),
         similitud=float(params.get("similitud", 0.75)),
         velocidad=float(params.get("velocidad", 1.0)))
     anotar_operacion(
         datos_dir=AJUSTES.datos, proyecto=proyecto.id, operacion="voz",
-        proveedor="elevenlabs", modelo=params.get("modelo", "multilingual"),
+        proveedor="elevenlabs", modelo=motor,
         caracteres=len(texto), contexto="voz:previsualizar",
         proyecto_dir=proyecto.raiz)
     return {"archivo": "pasos/voz/previsualizacion.mp3",
@@ -367,7 +395,9 @@ def proponer_voz(proyecto: Proyecto, encargo: str, idioma: str,
     por_id = {v["voice_id"]: v for v in catalogo}
     elegida = por_id.get(str(propuesta.get("voz", "")))
     if elegida is None:
-        elegida = por_id.get(params_defecto()["voz"]) or catalogo[0]
+        # voz alucinada: cae a la que sonaría de verdad con estos mandos
+        # (la del vídeo o la del canal), no a la de fábrica a ciegas
+        elegida = por_id.get(_voz_y_motor(params_defecto())[0]) or catalogo[0]
     def _flotante(clave, defecto, bajo, alto):
         try:
             valor = float(propuesta.get(clave, defecto))

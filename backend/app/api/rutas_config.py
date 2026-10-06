@@ -14,7 +14,7 @@ from .. import seguridad
 from ..config import AJUSTES
 from ..motores import llm, voz_elevenlabs
 from ..nucleo import coste as nucleo_coste
-from ..nucleo import recetas
+from ..nucleo import recetas, voz_canal
 from ..nucleo.claves import (CATALOGO, enmascaradas, guardar_claves,
                              probar_claves)
 from ..nucleo.proyecto import leer_json, escribir_json
@@ -340,3 +340,37 @@ def voces() -> list[dict]:
 def probar_voz() -> dict:
     from ..pasos import comun
     return voz_elevenlabs.probar(comun.claves_actuales())
+
+
+# --------------------------------------------------------- voz del canal
+#
+# La voz con la que el canal graba SUS vídeos se fija aquí, en la misma
+# pantalla donde vive la clave que la paga. Los vídeos que ya eligieron
+# la suya (pestaña de Voz, preset o estilo) no se tocan: la jerarquía
+# la resuelve p4_voz en cada corrida.
+
+def _motores_publicos() -> list[dict]:
+    return [{"id": ident, "nombre": nombre}
+            for ident, nombre in voz_canal.MOTORES.items()]
+
+
+@router.get("/ajustes/voz", dependencies=[_SESION])
+def ver_voz_canal() -> dict:
+    """Motor y voice_id fijados para los vídeos del canal."""
+    return {"voz": voz_canal.leer(AJUSTES.datos),
+            "motores": _motores_publicos()}
+
+
+@router.put("/ajustes/voz", dependencies=_MUTAR)
+def poner_voz_canal(cuerpo: dict) -> dict:
+    datos = cuerpo or {}
+    if not isinstance(datos, dict):
+        raise HTTPException(400, "se esperaba {motor, voz}")
+    try:
+        preferencia = voz_canal.guardar(
+            AJUSTES.datos,
+            motor=str(datos.get("motor", "")),
+            voz=str(datos.get("voz", "")))
+    except ValueError as fallo:
+        raise HTTPException(400, str(fallo)) from None
+    return {"voz": preferencia, "motores": _motores_publicos()}

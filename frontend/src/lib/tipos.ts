@@ -372,6 +372,13 @@ export interface VozCatalogo {
   idiomas: string[]
 }
 
+/** Motor y voice_id del canal para los vídeos sin elección propia
+ *  (GET/PUT /api/ajustes/voz). voz.voz vacía = cada vídeo manda. */
+export interface AjustesVoz {
+  voz: { motor: string; voz: string }
+  motores: { id: string; nombre: string }[]
+}
+
 /** Resultado de la cata de voz (POST /{pid}/voz/previsualizar). */
 export interface PrevisualizacionVoz {
   archivo: string

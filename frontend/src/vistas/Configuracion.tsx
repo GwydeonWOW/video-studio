@@ -18,6 +18,7 @@ import {
 import { api } from "../lib/api"
 import { dolares } from "../lib/utils"
 import type {
+  AjustesVoz,
   CatalogoProveedores,
   ClaveEstado,
   CodexFlujo,
@@ -606,13 +607,46 @@ function PestanaVoces() {
     null
   )
   const [copiada, setCopiada] = useState<string | null>(null)
+  const [motor, setMotor] = useState("")
+  const [idVoz, setIdVoz] = useState("")
+  const [motores, setMotores] = useState<{ id: string; nombre: string }[]>([])
+  const [guardandoCanal, setGuardandoCanal] = useState(false)
 
   useEffect(() => {
     api
       .get<Voz[]>("/api/voces")
       .then(setVoces)
       .catch(() => setVoces([]))
+    api
+      .get<AjustesVoz>("/api/ajustes/voz")
+      .then((a) => {
+        setMotores(a.motores)
+        setMotor(a.voz.motor)
+        setIdVoz(a.voz.voz)
+      })
+      .catch(() => void 0)
   }, [])
+
+  const guardarCanal = async () => {
+    setGuardandoCanal(true)
+    try {
+      const r = await api.put<AjustesVoz>("/api/ajustes/voz", {
+        motor,
+        voz: idVoz.trim(),
+      })
+      setMotor(r.voz.motor)
+      setIdVoz(r.voz.voz)
+      toast.success(
+        r.voz.voz
+          ? "voz del canal guardada: la usan los vídeos sin elección propia"
+          : "canal sin voz propia: cada vídeo manda"
+      )
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally {
+      setGuardandoCanal(false)
+    }
+  }
 
   const probar = useCallback(async () => {
     setProbando(true)
@@ -637,6 +671,75 @@ function PestanaVoces() {
 
   return (
     <div className="space-y-4">
+      <div className="space-y-3 rounded-md border p-4">
+        <div>
+          <h3 className="text-sm font-semibold">Voz de los vídeos</h3>
+          <p className="text-sm text-muted-foreground">
+            La usan los vídeos que no hayan elegido otra voz (su pestaña de
+            Voz, un preset o el estilo del canal). Cambiarla aquí es
+            inmediato: no hace falta re-crear nada.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Etiqueta htmlFor="voz-motor">Motor</Etiqueta>
+            <Selector valor={motor} alCambiar={setMotor}>
+              <DisparadorSelector id="voz-motor" />
+              <ContenidoSelector>
+                {motores.map((m) => (
+                  <Opcion key={m.id} valor={m.id}>
+                    {m.nombre}
+                  </Opcion>
+                ))}
+              </ContenidoSelector>
+            </Selector>
+          </div>
+          <div className="space-y-2">
+            <Etiqueta htmlFor="voz-id">ID de la voz</Etiqueta>
+            <div className="flex gap-2">
+              <Entrada
+                id="voz-id"
+                valor={idVoz}
+                alCambiar={(e) => setIdVoz(e.target.value)}
+                placeholder="vacío = manda cada vídeo"
+                className="font-mono text-xs"
+              />
+              {voces && voces.length > 0 && (
+                <Selector alCambiar={(v) => v && setIdVoz(v)}>
+                  <DisparadorSelector
+                    className="w-10 shrink-0 justify-center"
+                    title="Elegir del catálogo de la cuenta"
+                  />
+                  <ContenidoSelector>
+                    <ValorSelector placeholder="Elegir del catálogo…" />
+                    {voces.map((v) => (
+                      <Opcion key={v.voice_id} valor={v.voice_id}>
+                        {v.nombre}
+                      </Opcion>
+                    ))}
+                  </ContenidoSelector>
+                </Selector>
+              )}
+            </div>
+            {idVoz.trim() && (
+              <p className="truncate text-xs text-muted-foreground">
+                {voces?.find((v) => v.voice_id === idVoz.trim())?.nombre ??
+                  "voz propia (no está en el catálogo de la cuenta)"}
+              </p>
+            )}
+          </div>
+        </div>
+        <div>
+          <Boton onClick={guardarCanal} deshabilitado={guardandoCanal}>
+            {guardandoCanal ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Save />
+            )}
+            Guardar voz del canal
+          </Boton>
+        </div>
+      </div>
       <div className="flex flex-wrap items-center gap-2">
         <Boton variante="contorno" onClick={probar} deshabilitado={probando}>
           {probando ? <Loader2 className="animate-spin" /> : <Mic2 />}
