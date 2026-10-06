@@ -28,6 +28,7 @@ MOTORES = {
     "multilingual": "Eleven Multilingual v2 — natural, para narración",
     "flash": "Eleven Flash v2.5 — rápido y barato",
     "v3": "Eleven v3 — el más expresivo",
+    "v4": "Eleven v4 — la última generación",
 }
 
 #: La voz de fábrica de ElevenLabs (Rachel): la que lleva todo vídeo

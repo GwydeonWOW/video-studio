@@ -196,7 +196,7 @@ const CAMPOS: Record<string, DescriptorCampo[]> = {
       clave: "modelo",
       etiqueta: "Modelo",
       tipo: "selector",
-      opciones: ["multilingual", "turbo", "flash"],
+      opciones: ["multilingual", "flash", "v3", "v4"],
     },
     {
       clave: "estabilidad",

@@ -75,6 +75,10 @@ check("sin nada guardado el canal no tiene voz",
       por_defecto == {"motor": voz_canal.MOTOR_DEFECTO, "voz": ""},
       str(por_defecto))
 
+check("el canal ofrece la Eleven v4 y mapea al identificador real",
+      "v4" in voz_canal.MOTORES
+      and voz_elevenlabs._modelo_de("v4") == "eleven_v4")
+
 guardada = voz_canal.guardar(AJUSTES.datos, motor="flash",
                              voz="pNInz6obpgDQGcFmaJgB")
 check("guardar devuelve la preferencia saneada",
@@ -173,16 +177,21 @@ p4_voz.ejecutar(proyecto, sembrados, TrabajoMudo())
 check("cambiar la voz en Configuración es vivo en la siguiente corrida",
       llamadas[-1] == ("otra-voz-del-canal", "v3"), str(llamadas[-1]))
 
-p4_voz.ejecutar(proyecto, {"voz": "voz-elegida", "modelo": "v3"},
+p4_voz.ejecutar(proyecto, {"voz": "voz-elegida", "modelo": "v4"},
                 TrabajoMudo())
-check("lo elegido EN el vídeo manda sobre el canal",
-      llamadas[-1] == ("voz-elegida", "v3"), str(llamadas[-1]))
+check("lo elegido EN el vídeo manda sobre el canal (también la v4)",
+      llamadas[-1] == ("voz-elegida", "v4"), str(llamadas[-1]))
 
 p4_voz.ejecutar(proyecto, {"voz": "voz-elegida",
                            "modelo": voz_canal.MOTOR_DEFECTO},
                 TrabajoMudo())
 check("voz y motor se resuelen por separado (el motor de fábrica cae en el canal)",
       llamadas[-1] == ("voz-elegida", "v3"), str(llamadas[-1]))
+
+voz_canal.guardar(AJUSTES.datos, motor="v4", voz="voz-de-la-v4")
+p4_voz.ejecutar(proyecto, sembrados, TrabajoMudo())
+check("la v4 del canal se lleva el vídeo que sigue en fábrica",
+      llamadas[-1] == ("voz-de-la-v4", "v4"), str(llamadas[-1]))
 
 voz_canal.guardar(AJUSTES.datos, motor="flash", voz="")
 p4_voz.ejecutar(proyecto, sembrados, TrabajoMudo())

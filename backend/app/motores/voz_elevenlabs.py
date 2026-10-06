@@ -27,6 +27,7 @@ MODELOS = {
     "multilingual": "eleven_multilingual_v2",
     "flash": "eleven_flash_v2_5",
     "v3": "eleven_v3",
+    "v4": "eleven_v4",
 }
 
 #: Limite de la API por peticion; las narraciones largas se parten por
